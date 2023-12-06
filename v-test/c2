@@ -1,0 +1,165 @@
+const AWS = require('aws-sdk');
+const docClient = new AWS.DynamoDB.DocumentClient();
+const offlineClients = "offline_users";
+
+exports.handler = async (event) => {
+  const {
+      register_id,
+      account_role,
+      client_name,
+      client_type,
+      client_risk_limit,
+      existing_user_id,
+      master_share,
+      referral_share,
+      admin_share,
+      client_share,
+      ul_share,
+      ul_comm,
+      master_comm,
+      admin_comm,
+      referral_comm,
+      match_race_comm,
+      fancy_comm,
+      fancy_refferal_comm,
+      referral_name,
+      alias_name
+  } = event;
+
+
+  if (!register_id || !account_role || !client_name || !client_risk_limit || !existing_user_id || client_type  === "" || !alias_name) {
+      return {
+        statusCode: 400,
+        body: 'Missing mandatory field(s)'
+      };
+    }
+
+   if(+master_share + +referral_share + +admin_share + +client_share + +ul_share > 100){
+     return {
+        statusCode: 400,
+        body: 'Invalid share limit'
+      };
+    }
+
+
+  try {
+    const adminData = await getAdminDetails(register_id);
+    if (adminData.length) {
+      return {
+        statusCode: 400,
+        message: `${register_id} already existed`,
+      };
+    }
+      const existingUserDetails = await getUser(client_name, register_id,existing_user_id);
+      console.log('existingUserDetails',existingUserDetails);
+      if (existingUserDetails.Count > 0) {
+        return {
+          statusCode: 400,
+          error: 'true',
+          message: "Duplicate entry clientName or cliet id already exist"
+        };
+      }
+     let inputValues = {
+     ...event,
+      master_share: master_share ? +master_share : 0 ,
+      referral_share: referral_share ? +referral_share : 0,
+      admin_share: admin_share ? +admin_share : 0,
+      client_share: client_share ? +client_share : 0,
+      ul_share: ul_share ? +ul_share : 0,
+      master_comm: master_comm ? +master_comm : 0 ,
+      referral_comm: referral_comm ? +referral_comm : 0,
+      admin_comm: admin_comm ? +admin_comm : 0,
+      match_race_comm: match_race_comm ? +match_race_comm : 0,
+      ul_comm: ul_comm ? +ul_comm : 0,
+      fancy_comm: fancy_comm ? +fancy_comm : 0,
+      fancy_refferal_comm: fancy_refferal_comm ? +fancy_refferal_comm : 0,
+   };    
+  if(referral_name) {
+    const referalDetails = await getRefferalData(register_id,referral_name);
+  let referralObj = {};
+  if(referalDetails.Count>0) {
+    referralObj = referalDetails.Items[0];
+  }else {
+    let referId = "ref_"+new Date().valueOf();
+    const referralItem = {
+      Item: {
+        register_id:register_id,
+        refferal_id: referId,
+        referral_name: referral_name,
+        created_dt: new Date().toISOString()
+      },
+      TableName: 'offline_refferal',
+    };
+     let referObj = await docClient.put(referralItem).promise();
+     if(referObj) {
+       referralObj['refferal_id'] = referId;
+         referralObj['referral_name'] = referral_name;
+     }else {
+        return {
+      statusCode: 500,
+      error: 'true',
+      message: `Error occurred`
+    };
+     }
+  }
+  inputValues['refferal_id'] = referralObj['refferal_id'];
+  inputValues['referral_name'] = referralObj['referral_name'];
+  }  
+
+
+    await docClient.put({
+      TableName: offlineClients,
+      Item: {
+        client_id: 'client-' + new Date().valueOf(),
+        ...inputValues
+
+      }}).promise();
+    return {
+      statusCode: 200,
+      data: 'Client created successfully'
+    };
+  } catch (error) {
+    const response = {
+      statusCode: 500,
+      error: true,
+      body: JSON.stringify(error),
+    };
+    return response;
+  }
+
+};
+
+const getAdminDetails = (register_id) => {
+  let params = {
+          TableName: 'admin_accounts',
+          KeyConditionExpression: 'register_id = :register_id and p_id = :pIdValue',
+          ExpressionAttributeValues: {
+              ':register_id': register_id,
+              ':pIdValue': "1"
+          },
+          ScanIndexForward: true
+        };
+        return docClient.query(params).promise();
+};
+  const getUser = (client_name, register_id,existing_user_id) => {
+      const params = {
+        TableName: offlineClients,
+        KeyConditionExpression: "register_id = :register_id",
+        FilterExpression: 'client_name = :clientNameValue',
+        ExpressionAttributeValues: {
+          ':clientNameValue': client_name,
+          ':register_id': register_id,
+        }
+      };
+      return docClient.query(params).promise();
+    };
+
+const getRefferalData = (register_id,refferal_name) => {
+   const query = {
+    TableName: 'offline_refferal',
+    FilterExpression:'referral_name =:refferal_name',
+    KeyConditionExpression: `register_id = :register_id`,
+    ExpressionAttributeValues: { ':register_id': register_id, ':refferal_name': refferal_name }
+  };
+  return docClient.query(query).promise();
+};

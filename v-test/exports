@@ -1,0 +1,84 @@
+personal token badbeat: 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
+personal key: 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
+
+Jenkins Permissions Prod shield:
+  username: vinod_kumar
+  password: kumar$vinod630%shield
+
+Jenkins Permissions:
+  username: vinod_kumar
+  password: kumar$vinod630%
+
+
+OpenVPN Permissions:
+username: vinod.kumar
+password: vinodgcpVPN!006
+
+Tron Address: TG3XXyExBkPp9nzdajDZsozEu4BkaSJozs -> testnet,
+Tron Address: TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t -> mainnet,
+
+newWallet: Promise {
+  {
+    privateKey: 'E30060DBA4F02A9D3D3FEDDD3443C29F07B5232DE8B33A7BED363F230B3EE22D',
+    publicKey: '041EC32DFFA4CBE2EAB0B59D569C62540FECF7EA179F9924528BA9B6F211D020AAB467C15EC407EA47B52BCF45FFE46240C35E138454AEAB74D5AA8960FCE474F2',
+    address: {
+      base58: 'TENMjNcS48DEtsD51z19S14aep26LBZVXK',
+      hex: '4130415B79A85B111FA3AB2EC82D63BA3648510D25'
+    }
+  }
+}
+
+backup: ceiling seed draw strategy spoil quarter gasp gas toast argue width human
+
+{
+  mnemonic: e {
+    phrase: 'ceiling seed draw strategy spoil quarter gasp gas toast argue width human',
+    password: '',
+    wordlist: o { locale: 'en' },
+    entropy: '0x24f85d09eb6d255ed80b00e30173eb37'
+  },
+  privateKey: '2e4600dd2fb7693885ca0a99a89aa1ba7d3030ce1d368a901150c1301273136d',
+  publicKey: '040b77522bf4d9c4cbd4b5114d51bdc01a44f7c17ddbbd4bfa367009ee1c1a747b52f32f4538ff022a1a73e3eb4fbacbd6a68e2ebc3982d02298950f251e430a13',
+  address: 'TQ9rVy1ZP4rRGvNzacuAtkLLWf67bNvNXw'
+}
+
+{
+childInfo trx {"mnemonic":{"phrase":"spread volcano crop nurse nut economy lyrics ritual figure share news betray cube excite between scorpion very vocal regular slow opinion rubber glimpse modify",
+	"password":"",
+	"wordlist":{"locale":"en"},
+	"entropy":"0xd31eb4cfcbc97a8c615dd45618a6548ab3569d856e09f2feaad36619b77998cc"},
+	"privateKey":"0x2cde3522a8e3229d161dad3c5c91132b3442a1191a46c480c7ef61fdbf289911",
+	"publicKey":"0x046e913296ccaeef113198c106fb851d150bc60ed83cbb31d8a6b8ac0ede4973023a2979eacbf40efa656647abc8895796ee9f99dee2e8b5f4fd2cfa65f275082a",
+	"address":"TUx7VsoLACP6Kt3FSrKaxry9t7Zn4exDYu"} QmmTGSpTDnUheHfvsUaRnyH62oMiifXDvVACGYEGGGZ6ozBed4Cu
+}
+
+1 TRX = 1,000,000 SUN
+tronWeb.fromSun()
+Deposit monitor: 2815,
+Block chair: 2815, -> merchant user deposits, trx, trc20
+wallet service: 3151-1 TRX withdrawal completed 3114 -> trx withdrawals, 3115-> trc20 withdrawals,
+
+wallet transfer: 3150-1,
+merchant deposit: 3176,
+merchant receive: 3176,
+complete withdrawals: 
+{
+  mnemonic: e {
+    phrase: 'spread volcano crop nurse nut economy lyrics ritual figure share news betray cube excite between scorpion very vocal regular slow opinion rubber glimpse modify',
+    password: '',
+    wordlist: o { locale: 'en' },
+    entropy: '0xd31eb4cfcbc97a8c615dd45618a6548ab3569d856e09f2feaad36619b77998cc'
+  },
+  privateKey: '0x796bd6b4736b1cdc94b69afed4b979a1fe6851e805530e0fa5e127cb06741cb0',
+  publicKey: '0x0479994c9333b0859829fa392181fc1ebe0912bc67eb4ec84cfdce593c4a13146293200cdf2f9571a548e831aa8aa193eee09aa08a9e5588364a11a273a0d5d692',
+  address: 'TKGABLwfKkBfdcVA3nCdqnfopfJ6zpME3Y'
+}
+
+export NODE_OPTIONS="--max-old-space-size=4096"
+
+
+https://810728943042.signin.aws.amazon.com/console
+nikhi.texch
+nikhi.texch@1
+LambdaBasicExecutionRole
+arn:aws:iam::810728943042:role/LambdaBasicExecutionRole

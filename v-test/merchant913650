@@ -1,0 +1,47 @@
+{
+    "_id" : ObjectId("6526a0417c009c57c9c32274"),
+    "twoFA" : {
+        "secret" : null,
+        "enabled" : false,
+        "encoding" : ""
+    },
+    "cryptos" : [ 
+        ObjectId("619cbcf77e3c1ec6e774aed8"), 
+        ObjectId("62136277d54c603f4a30968c"), 
+        ObjectId("612a8252fd75eeaf6e8c4ae0"), 
+        ObjectId("62456a72ff46983ce2656fff"), 
+        ObjectId("62a82e0d47dd8b69eeef902f"), 
+        ObjectId("612a8252fd75eeaf6e8c4adf"), 
+        ObjectId("64c0be933981d62af24dbb80"), 
+        ObjectId("6183bafbb8dbb9c681dc3cf8"), 
+        ObjectId("65245bd6506d53c922527c1b")
+    ],
+    "contacts" : [ 
+        ObjectId("6526a0417c009c57c9c32272")
+    ],
+    "revealedDate" : null,
+    "kytRequired" : false,
+    "acceptExactAmountsOnly" : false,
+    "userWalletActive" : true,
+    "creditCardActive" : false,
+    "merchantWalletActivation" : true,
+    "merchantWithdrawalAutoApproval" : false,
+    "merchantId" : "merchant913650",
+    "name" : "Vinod Kumar",
+    "creditLimit" : 10,
+    "withdrawalSpread" : 0.1,
+    "depositSpread" : 0.1,
+    "creationDate" : ISODate("2023-10-11T13:16:49.666Z"),
+    "rateExpiryPeriod" : "5",
+    "testApiKey" : {
+        "key" : "4d20baaf-5c75-485e-b208-7da7f954fb52",
+        "createdDate" : ISODate("2023-10-11T13:16:49.666Z")
+    },
+    "prodApiKey" : {
+        "key" : "bac4c491-c6ab-46e1-ac30-3b9ccbec555d",
+        "createdDate" : ISODate("2023-10-11T13:16:49.666Z")
+    },
+    "paymentProvider" : ObjectId("634fbc5a603d2b1171c89892"),
+    "__v" : 2,
+    "activitation" : true
+}

@@ -1,0 +1,128 @@
+const AWS = require("aws-sdk");
+const dynamodb = new AWS.DynamoDB.DocumentClient();
+
+exports.handler = async (event, context) => {
+  try {
+    // console.log('@@@@@: event: ', event);
+    const connectionId = event.requestContext.connectionId;
+    const userNameStr = event.queryStringParameters.userid;
+    // console.log('userNameStr:', userNameStr, '  userNameStrType', typeof userNameStr);
+    const userID = userNameStr;
+    // console.log('userID:', userID);
+    let userName = "NA";
+    let from_user = userID;
+    let to_user = "NA";
+    let userType = 0;
+    let account_role = "";
+    let register_id = "";
+
+    if (userID.startsWith("client")) {
+      userType = 1;
+      const { uSS, userJs } = await getUsersInfo(userID);
+      if (uSS === 0)
+        return {
+          isBase64Encoded: false,
+          headers: { status: "fail" },
+          statusCode: 500,
+          body: "fail",
+        };
+      // console.log({userJs});
+      userName = userJs["user_name"];
+      to_user = userJs["creator_id"];
+      account_role = userJs["account_role"];
+      register_id = userJs["register_id"];
+    }
+
+    if (userID.startsWith("reg")) {
+      userType = 2;
+      const { uSS, userJs } = await getMasterInfo(userID);
+      if (uSS === 0)
+        return {
+          isBase64Encoded: false,
+          headers: { status: "fail" },
+          statusCode: 500,
+          body: "fail",
+        };
+      // console.log({userJs});
+      userName = userJs["user_name"];
+      to_user = userJs["creator_id"];
+      account_role = userJs["account_role"];
+      register_id = userJs["register_id"];
+    }
+
+    const tableYB = "chat_session";
+    const params = {
+      TableName: tableYB,
+      Item: {
+        p_id: "1",
+        session_id: connectionId,
+        name: userName,
+        id: userID,
+        user_type: userType,
+        log_ts: new Date().toISOString(),
+        account_role: account_role,
+        register_id: register_id,
+        to_user: to_user,
+        from_user: from_user,
+      },
+    };
+
+    await dynamodb.put(params).promise();
+
+    return {
+      isBase64Encoded: false,
+      headers: { status: "success" },
+      statusCode: 200,
+      body: "success",
+    };
+  } catch (error) {
+    // console.log('lambda_handler Exception: ', error);
+    return {
+      isBase64Encoded: false,
+      headers: { status: "fail" },
+      statusCode: 500,
+      body: "fail",
+    };
+  }
+};
+
+async function getUsersInfo(uNameID) {
+  try {
+    const params = {
+      TableName: "client_accounts",
+      ProjectionExpression: "register_id, user_name, account_role, creator_id",
+      Key: { p_id: "1", register_id: uNameID },
+    };
+
+    const response = await dynamodb.get(params).promise();
+    console.log(response.Item);
+    if (response.Item) {
+      return { uSS: 1, userJs: response.Item };
+    }
+    return { uSS: 0, userJs: {} };
+  } catch (error) {
+    // console.error("getUsersInfo Exception:", error);
+    return { uSS: 0, userJs: {} };
+  }
+}
+
+async function getMasterInfo(uNameID) {
+  try {
+    const params = {
+      TableName: "admin_accounts",
+      ProjectionExpression: "register_id, user_name, account_role, creator_id",
+      Key: { p_id: "1", register_id: uNameID },
+    };
+
+    const response = await dynamodb.get(params).promise();
+    console.log(response.Item);
+    if (response.Item) {
+      return { uSS: 1, userJs: response.Item };
+    }
+    return { uSS: 0, userJs: {} };
+  } catch (error) {
+    // console.error("getMasterInfo Exception:", error);
+    return { uSS: 0, userJs: {} };
+  }
+}
+

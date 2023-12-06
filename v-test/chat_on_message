@@ -1,0 +1,162 @@
+const AWS = require("aws-sdk");
+
+exports.handler = async (event, context) => {
+  try {
+    // console.log('chatMessage Start.......................................................................');
+    const dynamoDB = new AWS.DynamoDB.DocumentClient();
+    const connectionId = event.requestContext.connectionId;
+
+    // Query the DynamoDB table to get session users
+    const response = await dynamoDB
+      .query({
+        TableName: "chat_session",
+        KeyConditionExpression: "p_id = :p_id",
+        ExpressionAttributeValues: {
+          ":p_id": "1",
+        },
+      })
+      .promise();
+
+    const usersDyArray = response.Items;
+    // console.log('sessionUsersArray:::', usersDyArray);
+
+    let usernameFrom = "";
+    let userIdFrom = "";
+    let userTypeFrom = 0;
+    let connectionIdTo = "";
+    let userNameTo = "";
+    let userIdTo = "";
+    let messageText = "";
+    let creatorId = "";
+    let accountRole = "";
+
+    // Get data from the WebSocket event body
+    const messageBody = JSON.parse(event.body);
+    // console.log('messageBody: ', messageBody);
+    userIdTo = String(messageBody.to_user).trim();
+    messageText = String(messageBody.message).trim();
+    // console.log({userIdTo})
+    // Getting From UserName
+    usersDyArray.forEach((ee) => {
+      // console.log({ee, connectionId})
+      if (String(connectionId) === String(ee.session_id)) {
+        // console.log("if")
+        usernameFrom = String(ee.name);
+        userIdFrom = String(ee.from_user);
+        userIdTo = String(userIdTo);
+        userTypeFrom = String(ee.user_type);
+        accountRole = String(ee.account_role);
+        creatorId = String(ee.creator_id);
+        return;
+      }
+     else {
+      // console.log("else")
+        userIdFrom = String(ee.from_user);
+        creatorId = String(ee.creator_id);
+        usernameFrom = String(ee.name);
+        userIdFrom = String(messageBody.from_user).trim();
+        userIdTo = String(messageBody.to_user).trim();
+        userTypeFrom = String(ee.user_type);
+        accountRole = String(ee.account_role);
+        creatorId = String(ee.creator_id);
+      }
+    });
+
+    const tsObject = new Date().toISOString().slice(0, 19).replace("T", " ");
+    const data = {
+      message: messageText,
+      to_user_name: userNameTo,
+      to_user_id: userIdTo,
+      from_user_name: usernameFrom,
+      from_user_id: userIdFrom,
+      user_type: userTypeFrom,
+      ts: tsObject,
+      creator_id: creatorId,
+      account_role: accountRole,
+    };
+
+    // Sending message to both sender and receiver connections
+    if (userIdFrom.startsWith("client") || userIdFrom.startsWith("reg")) {
+      // console.log('dataMessage: ', connectionId, connectionIdTo);
+      try {
+        await sendToConnection(connectionId, data, event);
+        await sendToConnection(connectionIdTo, data, event);
+      } catch (e) {
+        console.log("Exception valrespC: ", e);
+      }
+
+      const messageBody = {
+        message: messageText,
+        to_user_name: userNameTo,
+        to_user_id: userIdTo,
+        from_user_name: usernameFrom,
+        from_user_id: userIdFrom,
+        user_type: userTypeFrom,
+        ts: tsObject,
+        creator_id: userIdFrom,
+        register_id: userIdTo,
+        account_role: accountRole,
+      };
+      await updateOrderMessage(messageBody);
+    }
+
+    // console.log('chatMessage Done.......................................................................');
+    return { statusCode: 200 };
+  } catch (e) {
+    console.log("chatMessage exception", e);
+    return { statusCode: 500 };
+  }
+};
+
+async function sendToConnection(connection_id, data, event) {
+  try {
+    // console.log('sendToConnection hello : ', connection_id, data);
+    const gatewayapi = new AWS.ApiGatewayManagementApi({
+      apiVersion: "2018-11-29",
+      endpoint:
+        "https://" +
+        event.requestContext.domainName +
+        "/" +
+        event.requestContext.stage,
+    });
+    const jsonString = JSON.stringify(data);
+    const dataBuffer = Buffer.from(jsonString, "utf-8");
+    await gatewayapi
+      .postToConnection({ ConnectionId: connection_id, Data: dataBuffer })
+      .promise();
+    // console.log('sendToConnection 2:', response);
+    return { statusCode: 200 };
+  } catch (e) {
+    console.log("sendToConnection exception", e);
+    return { statusCode: 500 };
+  }
+}
+
+async function updateOrderMessage(messageBody) {
+  try {
+    // console.log('updateOrderMessage messageBody: ', messageBody);
+    const dynamoDB = new AWS.DynamoDB.DocumentClient();
+    messageBody.seen_status = 0;
+    try {
+      messageBody.to_user_id_ts = `${messageBody.to_user_id}_${new Date()
+        .toISOString()
+        .slice(0, 19)
+        .replace("T", " ")}`;
+      messageBody.from_user_id_ts = `${messageBody.from_user_id}_${new Date()
+        .toISOString()
+        .slice(0, 19)
+        .replace("T", " ")}`;
+    } catch (e) {
+      console.log("Exception:", e);
+    }
+    const params = {
+      TableName: "chat_messages",
+      Item: messageBody,
+    };
+    await dynamoDB.put(params).promise();
+    console.log("updateOrderMessage ended");
+  } catch (e) {
+    console.log("updateOrderMessage Exception:", e);
+  }
+}
+

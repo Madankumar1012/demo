@@ -1,0 +1,571 @@
+const AWS = require('aws-sdk');
+const docClient = new AWS.DynamoDB.DocumentClient();
+
+exports.handler = async (event) => {
+  const { register_id,registered_match_id, declarestatus } = event;
+  let teamName = event.teamName;
+
+  const calulateWinOrLoseObject = (currentObject, updateObject) => {
+    return {
+      amount: currentObject.amount + (updateObject.amount),
+      clientComission: currentObject.clientComission + (updateObject.clientComission),
+      referralComission: currentObject.referralComission + (updateObject.referralComission),
+      client_name: currentObject.client_name,
+      referral_name:currentObject.referral_name,
+      refferal_id:currentObject.refferal_id,
+    };
+  };
+  const calculateTotalAmount =  (currentObject, updateObject) => {
+    return {
+      amount: (currentObject.amount) + parseFloat(updateObject.amount),
+      clientComission: +parseFloat(currentObject.clientComission) + parseFloat(updateObject.clientComission),
+      referralComission: +parseFloat(currentObject.referralComission) + parseFloat(updateObject.referralComission),
+      // totalLossOrProfit: currentObject.totalLossOrProfit + parseFloat(updateObject.shareLossOrProfit || updateObject.totalLossOrProfit),
+      upperLevalShare: +parseFloat(currentObject.upperLevalShare) + parseFloat(updateObject.upperLevalShare),
+    };
+  };
+  const params = {
+    TableName: 'registered_matches',
+    KeyConditionExpression: 'register_id = :register_id AND registered_match_id = :registered_match_id',
+    ExpressionAttributeValues: { ':register_id': register_id, ':registered_match_id': registered_match_id }
+  };
+  try {
+    const data = await docClient.query(params).promise();
+    let declaredUserReport = [];
+    console.log('data',data);
+    if (data.Count > 0) {
+      let register_match = data.Items[0];
+      
+      if (register_match.match_declared === 'Y') {
+        return {
+          statusCode: 404,
+          error: 'true',
+          message: 'Error: Match already declared'
+        };
+      }
+      if(register_match.match_declared === 'MR') {
+        let userReport = await getUserReportByMatch(register_id,registered_match_id);
+        declaredUserReport = userReport.Items;
+      }
+      //console.log("register_match",declaredUserReport);
+      if(declarestatus=='cancelled' || declarestatus =='abandon') {
+         let matchDetails =  await updateMatchDetails(register_id, registered_match_id, 'N/A', 'Y',0,declarestatus);
+         if(declaredUserReport.length >0) {
+           await updateMatchReport(register_id,registered_match_id,declaredUserReport);
+         }
+        return {
+          statusCode: 200,
+          message: 'Sorry! match cancelled or abandon!',
+          data: matchDetails
+        };
+      }
+      let offline_fancy_data = await getMatchFancyData(register_id,register_match.registered_match_id);
+       //console.log("offline_fancy_data",offline_fancy_data);
+      if(offline_fancy_data.Count>0) {
+        let findIndex = offline_fancy_data.Items.findIndex((item)=>item.fancy_status !='Y');
+        console.log({findIndex})
+        if(findIndex!=-1) {
+            return {
+          statusCode: 204,
+          message: 'Please declare all the fancies before declaring the match',
+          data: []
+        };
+        }
+      }
+      let match_entry_data = await getMatchEntryData(register_id,registered_match_id);
+      // console.log("match_entry_data",match_entry_data);
+
+      if (match_entry_data.Count > 0) {
+        let matchEntryRecords = match_entry_data.Items;
+        let client_object = {};
+        let totalAmount = {};
+        let matchEntryResult ={
+              amount: 0,
+              clientComission: 0,
+              clientShare: 0,
+              referalShare: 0,
+              referralComission: 0,
+              totalLossOrProfit: 0,
+              upperLevalShare: 0
+              };
+        let fancyEntryResult = {
+              amount: 0,
+              clientComission: 0,
+              clientShare: 0,
+              referalShare: 0,
+              referralComission: 0,
+              totalLossOrProfit: 0,
+              upperLevalShare: 0
+              };
+        for (let i = 0; i < matchEntryRecords.length; i++) {
+          let matchEntryRecord = matchEntryRecords[i];
+
+          if (!(register_match.team1 === teamName || register_match.team2 === teamName || declarestatus.toUpperCase()=='DRAW' )) {
+            return {
+              statusCode: 404,
+              error: 'true',
+              message: 'Invalid team name'
+            };
+          }
+        if(declarestatus.toUpperCase() =='DRAW' ) {
+          teamName = 'draw';
+        }
+          if (client_object[matchEntryRecord.client_id]) {
+            if (matchEntryRecord.team === teamName) {
+              client_object[matchEntryRecord.client_id]['matchEntryResult']['amount'] = client_object[matchEntryRecord.client_id]['matchEntryResult']['amount']+parseFloat(matchEntryRecord.riskObject.loseCalcultion.amount);
+            } else {
+                client_object[matchEntryRecord.client_id]['matchEntryResult']['amount'] = client_object[matchEntryRecord.client_id]['matchEntryResult']['amount']+parseFloat(matchEntryRecord.riskObject.winCalculation.amount);
+              matchEntryResult = calculateTotalAmount(matchEntryResult,matchEntryRecord.riskObject.winCalculation);
+            }
+          } else {
+            client_object[matchEntryRecord.client_id] ={'matchEntryResult': {
+              amount: 0,
+              client_name: matchEntryRecord.client_name,
+              referral_name:matchEntryRecord.referral_name,
+              refferal_id:matchEntryRecord.refferal_id,
+            },'fancyEntryResult': {
+              amount: 0,
+              clientComission: 0,
+              clientShare: 0,
+              referalShare: 0,
+              referralComission: 0,
+              totalLossOrProfit: 0,
+              upperLevalShare: 0,
+              client_name: matchEntryRecord.client_name,
+              referral_name:matchEntryRecord.referral_name,
+              refferal_id:matchEntryRecord.refferal_id,
+            }};
+
+            if (matchEntryRecord.team === teamName) {
+              client_object[matchEntryRecord.client_id]['matchEntryResult']['amount'] = client_object[matchEntryRecord.client_id]['matchEntryResult']['amount']+parseFloat(matchEntryRecord.riskObject.loseCalcultion.amount);
+            } else {
+            client_object[matchEntryRecord.client_id]['matchEntryResult']['amount'] =  client_object[matchEntryRecord.client_id]['matchEntryResult']['amount']+parseFloat(matchEntryRecord.riskObject.winCalculation.amount);
+
+            }
+          }
+        
+        }
+        
+        // Fancy Records
+        if (offline_fancy_data.Count > 0) {
+          let offline_fancy_records = offline_fancy_data.Items;
+          let fancy_records = await getFancyRecordsByMatch(register_id,register_match.registered_match_id);
+
+          if (fancy_records.Count > 0) {
+            let fancy_recordsObj = fancy_records.Items;
+
+            for (let i = 0; i < fancy_recordsObj.length; i++) {
+              let fancyEntry = fancy_recordsObj[i];
+              
+              let offline_fancy_record = offline_fancy_records.find((item) => {
+                return item.match_fancy_id === fancyEntry.match_fancy_id;
+              });
+              if (offline_fancy_record && offline_fancy_record.fancy_status) {
+                
+                if (client_object[fancyEntry.client_id]) {
+                  if (offline_fancy_record.fancy_status === fancyEntry.yN) {
+                    client_object[fancyEntry.client_id]['fancyEntryResult'] = await calulateWinOrLoseObject(client_object[fancyEntry.client_id]['fancyEntryResult'], fancyEntry.riskObject.loseCalcultion);
+                    fancyEntryResult = await calculateTotalAmount(fancyEntryResult,fancyEntry.riskObject.loseCalcultion);
+                  } else {
+                    client_object[fancyEntry.client_id]['fancyEntryResult'] = await calulateWinOrLoseObject(client_object[fancyEntry.client_id]['fancyEntryResult'], fancyEntry.riskObject.winCalculation);
+                    fancyEntryResult = await calculateTotalAmount(fancyEntryResult,fancyEntry.riskObject.winCalculation);
+                  }
+                } else {
+                    client_object[fancyEntry.client_id] ={'matchEntryResult': {
+                amount: 0,
+
+                client_name: fancyEntry.client_name,
+                referral_name:fancyEntry.referral_name,
+                refferal_id:fancyEntry.refferal_id,
+              },'fancyEntryResult': {
+                amount: 0,
+                clientComission: 0,
+                clientShare: 0,
+                referalShare: 0,
+                referralComission: 0,
+                totalLossOrProfit: 0,
+                upperLevalShare: 0,
+                client_name: fancyEntry.client_name,
+                referral_name:fancyEntry.referral_name,
+                refferal_id:fancyEntry.refferal_id,
+              }};
+
+                  if (offline_fancy_record.fancy_status === fancyEntry.yN) {
+                    client_object[fancyEntry.client_id]['fancyEntryResult'] = await calulateWinOrLoseObject(client_object[fancyEntry.client_id]['fancyEntryResult'], fancyEntry.riskObject.loseCalcultion);
+                    fancyEntryResult = await calculateTotalAmount(fancyEntryResult,fancyEntry.riskObject.loseCalcultion);
+                  } else {
+                    client_object[fancyEntry.client_id]['fancyEntryResult'] = await calulateWinOrLoseObject(client_object[fancyEntry.client_id]['fancyEntryResult'], fancyEntry.riskObject.winCalculation);
+                    fancyEntryResult = await calculateTotalAmount(fancyEntryResult,fancyEntry.riskObject.winCalculation);
+                  }
+
+                }
+                 
+              }
+            }
+          }
+        }
+         // console.log("declaredUserReport**",declaredUserReport);
+        if(declaredUserReport.length >0) {
+           await updateMatchReport(register_id,registered_match_id ,declaredUserReport);
+         }
+        // console.log("declaredUserReport",declaredUserReport);
+        totalAmount =  await saveUserMatchDetails(register_id,registered_match_id,client_object,totalAmount,declaredUserReport);
+        if(totalAmount.totalLossOrProfit ) {
+       const exgistingId = await getAdminRegisterId(register_id);
+      // console.log({exgistingId: exgistingId.Items[0]})
+        if(exgistingId.count === 0){
+            return {
+            statusCode: 400,
+            error: true,
+            message: 'Invalid id'
+          }; 
+        }
+
+        if(exgistingId?.Items[0]?.ul_commision) {
+           totalAmount['platformCommission'] =   exgistingId.Items[0].ul_commision*totalAmount.totalLossOrProfit/100;
+        }else {
+           totalAmount['platformCommission'] =   0.1*totalAmount.totalLossOrProfit/100;
+        }
+        
+       }else {
+          totalAmount['platformCommission'] = 0;
+       }
+      let matchDetails =  await updateMatchDetails(register_id, registered_match_id, teamName, 'Y',totalAmount,declarestatus);
+
+        return {
+          statusCode: 200,
+          message: 'Winning team results',
+          data: matchDetails
+        };
+      } else {
+        return {
+          statusCode: 404,
+          error: 'true',
+          message: 'Match details not found'
+        };
+      }
+    } else {
+      return {
+        statusCode: 500,
+        error: 'true',
+        message: 'Error occurred'
+      };
+    }
+  } catch (error) {
+    console.error(error);
+    return {
+      statusCode: 500,
+      error: 'true',
+      message: 'Error occurred'
+    };
+  }
+};
+const getUserReportByMatch = async(register_id,match_id) => {
+   const query = {
+    TableName: 'user_match_report',
+    FilterExpression:'match_id=:match_id',
+    KeyConditionExpression: 'register_id = :register_id',
+    ExpressionAttributeValues: { ':register_id':register_id,':match_id': match_id}
+  };
+  return docClient.query(query).promise();
+};
+const getFancyRecordsByMatch = async (register_id,match_id) => {
+  const query = {
+    TableName: 'fancy_entry',
+    FilterExpression:'record_status=:record_status',
+    KeyConditionExpression: 'register_id = :register_id AND begins_with(fancy_entry_id,:match_id)',
+    ExpressionAttributeValues: { ':register_id':register_id,':match_id': match_id,':record_status':'active' }
+  };
+  return docClient.query(query).promise();
+};
+
+const getMatchFancyData = async (register_id,match_id) => {
+  const query = {
+    TableName: 'offline_match_fancy',
+    KeyConditionExpression: 'register_id=:register_id AND begins_with(match_fancy_id, :match_id)',
+    ExpressionAttributeValues: { ':register_id':register_id,':match_id': match_id }
+  };
+  return docClient.query(query).promise();
+};
+
+const getMatchEntryData = async (register_id,match_id) => {
+  const query = {
+    TableName: 'match_entry',
+    FilterExpression:'record_status=:record_status',
+    KeyConditionExpression: 'register_id=:register_id AND begins_with(match_entry_id,:match_id)',
+    ExpressionAttributeValues: { ':register_id':register_id,':match_id': match_id,':record_status':'active' }
+  };
+  return docClient.query(query).promise();
+};
+
+const updateMatchReport = async(register_id,match_id,declaredUserReport) => {
+    const bulkUpdatePromises = declaredUserReport.map(async (item) => {
+      // update each item with the private visibility
+    
+      await docClient
+      .update({
+        TableName: 'user_match_report',
+          Key: {
+      'register_id': register_id,
+      'report_id': item.report_id
+    },
+        UpdateExpression: "SET report_status =:report_status,updated_dt =:updated_dt",
+        ExpressionAttributeValues: {
+         ':report_status':'inactive',
+         ':updated_dt':new Date().toDateString()
+        },
+      })
+      .promise();
+  });
+  // wait till bulk update is completed
+
+await Promise.all(bulkUpdatePromises); 
+};
+const saveUserMatchDetails = async (register_id, match_id, client_object,totalAmount,declaredUserReport) => {
+  let insertArray = [];
+  let keys = Object.keys(client_object);
+  const { Items = [] } = await docClient
+    .query({
+      TableName: 'offline_users',
+      KeyConditionExpression: "register_id=:register_id",
+      ExpressionAttributeValues: {
+        ":register_id":register_id,
+      },
+    })
+    .promise();
+  const filterRecords = Items.filter((item)=>keys.includes(item.client_id));
+  console.log('keys',keys);
+    let grandTotal = {
+        'clientShare':0,
+        'referalShare':0,
+        'betAmountWithClientFancyCommission':0,
+        'betAmountWithReferralFancyCommission':0,
+        'betAmount':0,
+        'clientFancyComission':0,
+        'totalBetAmountWithFancyCommissions':0,
+        'clientComission':0,
+        'referralComission':0,
+        'referralFancyComission':0,
+        'totalLossOrProfit':0,
+        'referalNet':0,
+        'clientNet':0
+
+    };
+  for (let i = 0; i < keys.length; i++) {
+    let match_and_fancy_amount = client_object[keys[i]]['matchEntryResult'].amount
+    +client_object[keys[i]]['fancyEntryResult'].amount;
+    let amout_with_clnt_rl_com = +match_and_fancy_amount+client_object[keys[i]]['fancyEntryResult'].clientComission;
+    let amout_with_ref_rl_com = +match_and_fancy_amount+client_object[keys[i]]['fancyEntryResult'].referralComission;
+    let total_amount_with_commissions =  +(amout_with_clnt_rl_com+amout_with_ref_rl_com);
+    let userDetails = filterRecords.find((item)=>item.client_id == keys[i]);
+    let clientComission = 0;
+    let referralComission =0;
+    //let withoutAllComission = 0;
+    let clientComissionRate = 0;
+    let referalShareRate= +parseFloat(userDetails.referral_share || 0);
+    let clientShareRate =+parseFloat(userDetails.client_share  || 0);
+    
+     let clientShare= +parseFloat(((-1*amout_with_clnt_rl_com)*clientShareRate/100)).toFixed(2);
+      let referalShare=+parseFloat((-1*amout_with_ref_rl_com)*referalShareRate/100).toFixed(2);
+     if(amout_with_clnt_rl_com<=0) {
+       clientShare = -1*(clientShare);
+       referalShare =-1*referalShare;
+     }
+   
+    let upperLevalShare=+parseFloat(total_amount_with_commissions*userDetails.ul_share/100).toFixed(2);
+    if(amout_with_clnt_rl_com >0) {
+        clientComissionRate = +parseFloat(userDetails.match_race_comm)>6?6: +parseFloat(userDetails.match_race_comm);
+        clientComission =-1* ((amout_with_clnt_rl_com+clientShare)*clientComissionRate/100).toFixed(2);
+        referralComission =-1* ((amout_with_ref_rl_com+referalShare) * +parseFloat(userDetails.referral_comm)/100).toFixed(2);
+         //withoutAllComission = +parseFloat((+clientComission)+ +referralComission).toFixed(2);
+        upperLevalShare=upperLevalShare;
+    }
+    let clientFancyComission = +parseFloat(client_object[keys[i]]['fancyEntryResult'].clientComission);
+    let referalFancyComission = +parseFloat(client_object[keys[i]]['fancyEntryResult'].referralComission);
+    client_object[keys[i]]['totalAmount'] = {
+          betAmount:match_and_fancy_amount,
+          clientFancyComission: clientFancyComission,
+          referralFancyComission:referalFancyComission,
+          betAmountWithClientFancyCommission:amout_with_clnt_rl_com,
+          betAmountWithReferralFancyCommission:amout_with_ref_rl_com,
+          clientShare:+parseFloat(clientShare),
+          referalShare:+parseFloat(referalShare),
+          clientComission:+parseFloat(clientComission),
+          referralComission:+parseFloat(referralComission),
+          upperLevalShare:+parseFloat(upperLevalShare),
+          clientNet:+parseFloat(amout_with_clnt_rl_com+clientShare+clientComission),
+          referalNet:referalShare+referralComission,
+          totalLossOrProfit:total_amount_with_commissions+1*clientShare+1*clientComission+1*referalShare+1*referralComission,
+          amount:total_amount_with_commissions,
+          client_name:  client_object[keys[i]]['matchEntryResult'].client_name || client_object[keys[i]]['fancyEntryResult'].client_name  ,
+          referral_name: client_object[keys[i]]['matchEntryResult'].client_name || client_object[keys[i]]['fancyEntryResult'].client_name  ,
+          refferal_id: client_object[keys[i]]['matchEntryResult'].client_name || client_object[keys[i]]['fancyEntryResult'].client_name
+    };
+    grandTotal = {
+        'clientShare':grandTotal.clientShare+clientShare,
+        'referalShare':grandTotal.referalShare+referalShare,
+        'betAmountWithClientFancyCommission':grandTotal.betAmountWithClientFancyCommission+amout_with_clnt_rl_com,
+        'betAmountWithReferralFancyCommission':grandTotal.betAmountWithReferralFancyCommission+amout_with_ref_rl_com,
+        'betAmount':grandTotal.betAmount+(+match_and_fancy_amount),
+        'clientFancyComission':grandTotal.clientFancyComission+clientFancyComission,
+        'referralFancyComission':grandTotal.referralFancyComission+referalFancyComission,
+        'totalBetAmountWithFancyCommissions':grandTotal.totalBetAmountWithFancyCommissions+total_amount_with_commissions,
+        'referralComission':grandTotal.referralComission+referralComission,
+        'clientComission':grandTotal.clientComission+clientComission,
+        'totalLossOrProfit':grandTotal.totalLossOrProfit+ total_amount_with_commissions+1*clientShare+1*clientComission+1*referalShare+1*referralComission,
+        'referalNet':grandTotal.referalNet+(referalShare+referralComission),
+        'clientNet':grandTotal.clientNet+(amout_with_clnt_rl_com+clientShare+clientComission),
+
+    };
+    insertArray.push({
+      PutRequest: {
+        Item: {
+          report_id: keys[i]+'-'+'rpt-id' + new Date().valueOf(),
+          ...client_object[keys[i]]['totalAmount'],
+          matchEntryResult:client_object[keys[i]].matchEntryResult,
+          fancyEntryResult:client_object[keys[i]].fancyEntryResult,
+          report_status:'active',
+          client_id: keys[i],
+          match_id: match_id,
+          created_date: new Date().toDateString(),
+          created_dt: new Date().getTime(),
+          register_id: register_id,
+        }
+      }
+    });
+  }
+  // console.log("result", insertArray[0].PutRequest["Item"]);
+
+  await docClient.batchWrite({ RequestItems: { user_match_report: insertArray } }).promise();
+
+
+  const bulkUpdatePromises = filterRecords.map(async (item) => {
+      // update each item with the private visibility
+       let client_amount = +client_object[item.client_id]['totalAmount']['clientNet'];
+       //console.log("client_amount",client_amount,typeof client_amount);
+    let existingClientData = declaredUserReport?.find((item1)=> item1.client_id == item.client_id );
+        // console.log('item',item);
+      if(existingClientData) {
+        client_amount = client_amount-(existingClientData.amount -existingClientData.clientShare-existingClientData.clientComission);
+      }
+       console.log("item.pending_amount",client_amount,+item.pending_amount ? +parseFloat(item.pending_amount)+client_amount: +client_amount);
+      let tempResults =  await docClient
+      .update({
+        TableName: 'offline_users',
+          Key: {
+      'register_id': register_id,
+      'client_id': item.client_id
+    },
+        UpdateExpression: "SET total_amount = :totalAmount,pending_amount=:pendingAmount",
+        ExpressionAttributeValues: {
+          ":totalAmount": +item.total_amount ? (+item.total_amount + +client_amount) : +client_amount,
+          ":pendingAmount":+item.pending_amount ? (+parseFloat(item.pending_amount)+ +client_amount) : +client_amount
+        },
+      })
+      .promise();
+      console.log({tempResults})
+  });
+  // wait till bulk update is completed
+
+await Promise.all(bulkUpdatePromises); 
+await updateRefferalDetails(register_id,client_object,declaredUserReport,keys);
+return grandTotal;
+};
+
+const updateRefferalDetails = async(register_id,client_object,declaredUserReport,clientIds) => {
+    let clientArray = Object.values(client_object);
+    let filterObject = {};
+    for(let i =0;i<clientArray.length;i++) {
+        let clientObj = clientArray[i];
+         let existingClientData = declaredUserReport?.find((item)=> clientIds.includes(item.client_id) );
+        if(filterObject[clientObj.refferal_id]) {
+            filterObject[clientObj.refferal_id]['referralComission'] =  
+            filterObject[clientObj.refferal_id]['referralComission'] +clientObj.referralComission;
+            filterObject[clientObj.refferal_id]['referalShare'] =  
+            filterObject[clientObj.refferal_id]['referalShare'] +clientObj.referalShare;
+            filterObject[clientObj.refferal_id]['totalProfitOrLoss'] =  
+            filterObject[clientObj.refferal_id]['totalProfitOrLoss']+clientObj.referalShare+clientObj.referralComission;
+        }else {
+              if(existingClientData){
+              filterObject[clientObj.refferal_id] = {
+                'referralComission':clientObj.referralComission-existingClientData.referralComission,
+                'referalShare':clientObj.referalShare-existingClientData.referalShare,
+                'totalProfitOrLoss':(clientObj.referralComission+clientObj.referalShare)-(existingClientData.referalShare
+                +existingClientData.referralComission)
+            };
+          }else {
+              filterObject[clientObj.refferal_id] = {
+                'referralComission':clientObj.referralComission,
+                'referalShare':clientObj.referalShare,
+                'totalProfitOrLoss':(clientObj.referralComission+clientObj.referalShare)
+            };
+          }
+        }
+    }
+    if(filterObject) {
+        let keys = Object.keys(filterObject);
+        const { Items = [] } = await docClient
+        .query({
+          TableName: 'offline_refferal',
+          KeyConditionExpression: "register_id=:register_id",
+          ExpressionAttributeValues: {
+            ":register_id":register_id,
+          },
+        })
+        .promise();
+        const filterRecords = Items.filter((item)=>keys.includes(item.refferal_id));
+        const bulkUpdatePromises = filterRecords.map(async (item) => {
+            // update each item with the private visibility
+            await docClient
+            .update({
+              TableName: 'offline_refferal',
+                Key: {
+            'register_id': register_id,
+            'client_id': item.client_id
+          },
+              UpdateExpression: "SET total_profit_or_loss = :totalAmount,pending_amount=:pendingAmount,share=:share,comission=:comission",
+              ExpressionAttributeValues: {
+                ":totalAmount": item.total_profit_or_loss?item.total_profit_or_loss+filterObject[item.refferal_id]['totalProfitOrLoss']:filterObject[item.refferal_id]['totalProfitOrLoss'],
+                ":pendingAmount":item.pending_amount ? item.pending_amount+filterObject[item.refferal_id]['totalProfitOrLoss']:filterObject[item.refferal_id]['totalProfitOrLoss'],
+                ":comission":item.comission?item.comission+filterObject[item.refferal_id]['referralComission']:filterObject[item.refferal_id]['referralComission'],
+                ":share":item.share?item.share+filterObject[item.refferal_id]['referalShare']:filterObject[item.refferal_id]['referalShare']
+              },
+            })
+            .promise();
+        });
+        // wait till bulk update is completed
+      
+      return Promise.all(bulkUpdatePromises); 
+    }
+};
+const updateMatchDetails = async (register_id, registered_match_id, team, status,totalAmount,result_status) => {
+  const query = {
+    TableName: 'registered_matches',
+    Key: {
+      register_id: register_id,
+      registered_match_id: registered_match_id
+    },
+    UpdateExpression: 'SET match_declared = :status,winTeam=:team, totalAmount =:totalAmount, result_status =:result_status',
+    ExpressionAttributeValues: {
+      ':status': status,
+      ":team":team,
+      ":totalAmount":totalAmount,
+      ":result_status":result_status
+    },
+    ReturnValues: 'ALL_NEW'
+  };
+
+  return docClient.update(query).promise();
+};
+
+const getAdminRegisterId = (register_id) => {
+  const query = {
+    TableName: "admin_accounts",
+    KeyConditionExpression: `register_id = :registerIdValue and p_id = :pIdValue`,
+    ExpressionAttributeValues: {
+      ":registerIdValue": register_id,
+      ":pIdValue": "1",
+    },
+  };
+  return docClient.query(query).promise();
+};

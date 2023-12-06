@@ -1,0 +1,117 @@
+const AWS = require('aws-sdk');
+const docClient = new AWS.DynamoDB.DocumentClient();
+
+exports.handler = async (event) => {
+    
+    const { register_id}= event;
+    if(!register_id ) {
+         return {
+            statusCode:401,
+            error:'true',
+            message:'Missing Mandatory fields'
+        };
+    }
+    
+   const calulateSumObject = (currentObject, updateObject,accountMatchData) => {
+    return {
+      amount: currentObject.amount +(updateObject.amount),
+      platformComission: currentObject.platformComission+ (updateObject.platformComission),
+      clientComission: currentObject.clientComission+(updateObject.clientComission),
+      clientShare: currentObject.clientShare+(updateObject.clientShare),
+      referalShare: currentObject.referalShare + (updateObject.referalShare),
+      referralComission: currentObject.referralComission + (updateObject.referralComission),
+      totalLossOrProfit: currentObject.totalLossOrProfit + (updateObject.totalLossOrProfit),
+      upperLevalShare: currentObject.upperLevalShare + (updateObject.upperLevalShare),
+      match_id :currentObject.match_id,
+      match_name:accountMatchData?.Items[0]?.team1+ 'VS '+accountMatchData?.Items[0].team2,
+      winTeam:accountMatchData?.Items[0]?.winTeam,
+      matchTimeStamp:accountMatchData?.Items[0]?.matchTimeStamp
+    };
+   };
+   const params = {
+      TableName: 'user_match_report',
+      //FilterExpression:'client_id =:client_id AND report_status ='active'',
+      KeyConditionExpression: 'register_id = :register_id',
+      ExpressionAttributeValues: {
+          ':register_id': register_id,
+          ':client_id':client_id,
+          //':report_status':'inactive' 
+          }
+    };
+    try{
+        const data = await docClient.query(params).promise();
+         if (data.Items.length > 0) {
+             let match_report_data = data.Items;
+               let match_data_by_id = {};
+             for(let i =0;i<match_report_data.length;i++) {
+                   let match_report = match_report_data[i];
+                if(match_report.match_id) {
+                     const accountMatchData = await getAccountData(register_id,match_report.match_id);
+                    console.log(accountMatchData,"match_report_data");
+                   if (match_data_by_id[match_report.match_id]) {
+                        match_data_by_id[match_report.match_id] = await calulateSumObject(match_data_by_id[match_report.match_id], match_report,accountMatchData);
+                        match_data_by_id[match_report.match_id]={
+                            ...match_data_by_id[match_report.match_id]
+                        };
+                   }else {
+                      match_data_by_id[match_report.match_id] = {
+                          amount: 0,
+                          clientComission: 0,
+                          platformComission:0,
+                          clientShare: 0,
+                          referalShare: 0,
+                          referralComission: 0,
+                          totalLossOrProfit: 0,
+                          upperLevalShare: 0,
+                          match_name: '',
+                          match_id :'',
+                          matchTimeStamp:''
+                        }; 
+                     match_data_by_id[match_report.match_id] = await calulateSumObject(match_data_by_id[match_report.match_id], match_report,accountMatchData);
+
+                   }
+               }
+         } 
+          const sortedMatchesData = Object.values(match_data_by_id).sort((topLosers,topWinners ) => topWinners.totalLossOrProfit - topLosers.totalLossOrProfit);
+
+            const topLosers = sortedMatchesData.filter(item => item.totalLossOrProfit < 0).slice(0, 10);
+            const topWinners = sortedMatchesData.filter(item => item.totalLossOrProfit >= 0).slice(0, 10);
+
+        return {
+          statusCode: 200,
+          message: 'Data retrieved successfully',
+          data: {
+            "topLosers": topLosers,
+            "topWinners": topWinners
+          }
+         // data: {"matches_data":Object.values(match_data_by_id)}
+        };
+      }else {
+            return {
+            statusCode:404,
+            error:'true',
+            message:'There is no match report avaialble'
+        };
+      }
+
+    } catch (error){
+        console.log('error',error);
+        return {
+            statusCode:500,
+            error:'true',
+            message:'Error getting while retriving the data'
+        };
+    }
+};
+        
+const getAccountData = async (register_id,match_id) => {
+  const params = {
+  TableName: 'registered_matches',
+  KeyConditionExpression: 'register_id = :register_id AND registered_match_id  = :registered_match_id ',
+  ExpressionAttributeValues: {
+    ':registered_match_id': match_id,
+    ':register_id': register_id
+  }
+};
+  return await docClient.query(params).promise();
+};

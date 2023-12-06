@@ -1,0 +1,108 @@
+const AWS = require('aws-sdk');
+const docClient = new AWS.DynamoDB.DocumentClient();
+
+exports.handler = async (event) => {
+  const { register_id, account_role } = event;
+
+  try {
+    const validRoles = ['admin', 'subadmin', 'supermaster', 'master', 'superadmin', 'director', 'agent', 'subadmin', 'supermaster', 'client', 'company'];
+    if (!validRoles.includes(account_role)) {
+      return {
+        statusCode: 400,
+        error: true,
+        message: 'Invalid role'
+      };
+    }
+
+
+    const registeredData = await getRegisterData(register_id);
+
+    if (!registeredData || registeredData.Count === 0) {
+      return {
+        statusCode: 400,
+        error: true,
+        message: 'Invalid Details'
+      };
+    }
+
+    const params = {
+      TableName: 'offline_matches',
+      KeyConditionExpression: 'register_id = :register_id',
+      ExpressionAttributeValues: {
+        ':register_id': register_id
+      }
+    };
+
+    const matchDataByRole = await docClient.query(params).promise();
+    const matchData = matchDataByRole.Items || [];
+
+    if (matchData.length === 0) {
+      return {
+        statusCode: 404,
+        message: 'Data not found'
+      };
+    }
+
+
+    const currentDate = new Date();
+    currentDate.setHours(0, 0, 0, 0);
+
+    const nextDate = new Date(currentDate);
+    nextDate.setDate(nextDate.getDate() + 1);
+
+
+    const liveMatches = [];
+    const todaysMatches = [];
+    const upCommingMatches = [];
+
+    matchData.forEach((object) => {
+      const matchTimeStamp = object.matchTimeStamp || 0;
+      const timeoffset = object.timeoffset || -330;
+
+      const matchTimeStampWithOffset = matchTimeStamp + (timeoffset * 60000);
+
+      if (matchTimeStampWithOffset >= nextDate.getTime()) {
+        upCommingMatches.push(object);
+      } else if (matchTimeStampWithOffset >= currentDate.getTime()) {
+        todaysMatches.push(object);
+      } else {
+        liveMatches.push(object);
+      }
+    });
+
+    const matchDataByType = {
+      liveMatches,
+      todaysMatches,
+      upCommingMatches
+    };
+
+    return {
+      statusCode: 200,
+      error: false,
+      message: 'Data retrieved successfully',
+      data: matchDataByType
+    };
+  } catch (error) {
+    console.error(error);
+    return {
+      statusCode: 500,
+      error: true,
+      message: 'Error occurred while retrieving data'
+    };
+  }
+};
+
+const getRegisterData = (register_id) => {
+  const query = {
+    TableName: 'admin_accounts',
+   // KeyConditionExpression: 'register_id = :register_id and p_id = :p_id',
+   FilterExpression: 'creator_id = :creator_id',
+    ExpressionAttributeValues: {
+      // ':register_id': register_id,
+      // ':p_id':'1'
+      ':creator_id': register_id
+    }
+  };
+  return docClient.scan(query).promise();
+};
+

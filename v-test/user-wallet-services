@@ -1,0 +1,874 @@
+const Bitcoin = require('bitcoinjs-lib');
+const Bip39 = require('bip39');
+const ethUtil = require('ethereumjs-util');
+const  mongoose = require('mongoose');
+const ethers = require("ethers");
+const axios = require("axios")
+const bitcore = require('bitcore-lib');
+const litecore = require('bitcore-lib-ltc');
+const ecc = require('tiny-secp256k1')
+const { BIP32Factory } = require('bip32');
+const Bip32 = BIP32Factory(ecc)
+
+const ethWallet = require("ethereumjs-wallet");
+const { convertRippleAdrr } = require ('./ripple_utils.js');
+const { cryptoModel } = require("../db/models/crypto.js");
+const { ExchangeRateCacheModel } = require("../db/models/exchangeRateCache")
+const { userWalletModel } = require("../db/models/userWallet.js");
+const { merchantWalletModel } = require("../db/models/merchantWallet");
+const { userTransactionModel } = require("../db/models/b2cUserTransactions");
+const { userBalanceModel } = require("../db/models/b2cUserBalances");
+const { cryptoList, derivationPaths,litecoinmainnet,litecointestnet,networks } = require("../config/rawData.js");
+const { saveErrorLog } = require("../services/errorLogService.js");
+const {getPaymentProviderSettings} = require("../DAOServices/paymentProvidersDAO.js")
+const { generateSeed, bip32RootKey, generateWallet } = require('./generateMnemonic')
+const { STATUS_B2C_SEND_NEW_REQUEST, STATUS_B2C_SEND_PROCESSING, STATUS_B2C_SEND_TO_RECIPIENT, 
+    STATUS_B2C_SEND_COMPLETED, B2C_STATUS_BUY_COMPLETED, STATUS_B2C_RECEIVE_COMPLETED, STATUS_B2C_SEND_ERROR } = require('../constants/index')
+const { getCryptoExchangeRate, getTradeRatePrice, getTradeRateURL } = require('../services/commonService'); 
+const { b2cGlobalSettingsModel } = require('../db/models/b2cGlobalSettings.js');
+
+// const networks = [
+//     { "blockchain": "Bitcoin", "cryptoId": "BTCTEST", "network": Bitcoin.networks.testnet, networkType: "testnet" },
+//     { "blockchain": "Bitcoin", "cryptoId": "BTC", "network": Bitcoin.networks.bitcoin, networkType: "mainnet" },
+//     { "blockchain": "Ethereum", "cryptoId": "ETH", "network": Bitcoin.networks.bitcoin, networkType: "mainnet" },
+//     { "blockchain": "Ethereum", "cryptoId": "ETH", "network": Bitcoin.networks.testnet, networkType: "testnet" },
+//     { "blockchain": "Litecoin", "cryptoId": "LTC", "network": litecointestnet, networkType: "testnet" },
+//     { "blockchain": "Litecoin", "cryptoId": "LTC", "network": litecoinmainnet, networkType: "mainnet" },
+//     { "blockchain": "Ripple", "cryptoId": "XRP", "network": Bitcoin.networks.testnet, networkType: "testnet" },
+//     { "blockchain": "Ripple", "cryptoId": "XRP", "network": Bitcoin.networks.bitcoin, networkType: "mainnet" }
+
+// ]
+
+const createUserWallets = async (seed) => {
+    try {
+        const cryptoCoinList = await cryptoModel.find({
+            cryptoId: { $in: cryptoList },
+        });
+        let activeWalletCoinList = [];
+        let activeNetworks = ["mainnet"];
+        for (let i = 0; i < cryptoCoinList.length; i++) {
+            if (["Bitcoin", "Ethereum", "Litecoin", "Ripple"].includes(cryptoCoinList[i].name))
+                activeNetworks = ["testnet", "mainnet"];
+            else activeNetworks = ["mainnet"];
+            for (let j = 0; j < activeNetworks.length; j++)
+                activeWalletCoinList.push(
+                    checkActiveWallet(
+                        seed,
+                        cryptoCoinList[i].name,
+                        cryptoCoinList[i].cryptoId,
+                        cryptoCoinList[i]._id,
+                        activeNetworks[j]
+                    )
+                );
+        }
+        return await Promise.all(activeWalletCoinList);
+    } catch (error) {
+        console.log(error)
+        saveErrorLog({
+            merchantId: null,
+            transactionId: null,
+            component: "UserWalletManagementService",
+            severity: null,
+            errorCode: error.code ? error.code.toString() : "406",
+            errorMessage: error.message ? "Error in createUserWallets of user-wallet-service" + error.message : "Error in createUserWallets of user-wallet-service",
+            postMvpComment: null,
+        })
+    }
+};
+
+const checkActiveWallet = async (seed,coin, cryptoId, coinId, activeNetworks) => {
+    try {
+        const activeWalletCount = await userWalletModel.count({ "cryptoId": coinId, "network": activeNetworks, "userId": { $eq: null } });
+        console.log(`Active ${coin} (${activeNetworks}) wallets`, activeWalletCount);
+        console.log("checkActiveWallet called:\n","coinId:", coinId)
+        const b2cGlobalSetting = await b2cGlobalSettingsModel.findOne({cryptoId: new mongoose.Types.ObjectId(coinId), network: activeNetworks})
+        console.log("b2cGlobalSetting", JSON.stringify(b2cGlobalSetting))
+        if (!b2cGlobalSetting) {
+            console.log("Error: b2cGlobalSetting is not found for ", cryptoId)
+            throw new Error("Error: b2cGlobalSetting is not found for ", cryptoId)
+        }
+        const requireWalletCount = Number(b2cGlobalSetting.maximumWallets) 
+        if (activeWalletCount < b2cGlobalSetting.minimunWallets) {
+            console.log(`Total ${requireWalletCount - activeWalletCount} new ${coin} wallets required`);
+            if (activeWalletCount > 0) {
+                const maxIndex = await userWalletModel.findOne({ "cryptoId": coinId, "network": activeNetworks }, { "walletId": 1, "_id": 0 }).sort({ walletId: -1 });
+                return await createWallet(seed, coin, cryptoId, coinId, requireWalletCount - activeWalletCount, (Number(maxIndex.walletId) + 1), activeNetworks);
+
+            } else {
+                return await createWallet(seed, coin, cryptoId, coinId, b2cGlobalSetting.minimunWallets, 0, activeNetworks);
+            }
+        } else {
+            console.log(`Total 0 new ${coin} (${activeNetworks}) wallets required`);
+            console.log("------------------------------------");
+            return
+        }
+    } catch (error) {
+        console.log(error);
+        saveErrorLog({
+            merchantId: null,
+            transactionId: null,
+            component: "UserWalletManagementService",
+            severity: null,
+            errorCode: error.code ? error.code.toString() : "406",
+            errorMessage: error.message ? "Error in checkActiveWallet of user-wallet-service" + error.message : "Error in checkActiveWallet of user-wallet-service",
+            postMvpComment: null,
+        })
+        throw new Error(error);
+    }
+}
+
+const createWallet = async (mnemonic, coin = coinType, cryptoId, coinId, walletRequire = totalWallet, index = 0, activeNetworks) => {
+    try {
+        const derivationPath = derivationPaths.filter(obj => obj.coin === coin && obj.network === activeNetworks);
+        const activeBlockchain = networks.filter(obj => obj.blockchain === coin && obj.networkType === activeNetworks)[0];
+        if (derivationPath.length === 0)
+            return ("Please add valid coin type");
+
+        //seed generation
+        const seed = await Bip39.mnemonicToSeed(mnemonic);
+
+        //genrate bip32RootKey
+        const root = await Bip32.fromSeed(seed, activeBlockchain.network);
+
+        let walletList = [];
+
+        for (let i = 0; i < walletRequire; i++) {
+            let walletInfo = {};
+            const path = `${derivationPath[0].path}/${index}`;
+            const child = await root.derivePath(path);
+            const childInfo = await getAddress(child, activeBlockchain.network);
+            let key = "";
+            if(cryptoId == "XRP"){
+                key = await convertRippleAdrr(childInfo.address);
+                childInfo.address = key;
+            }
+            walletInfo = {
+                walletId: index,
+                blockchain: activeBlockchain.blockchain,
+                network: activeBlockchain.networkType,
+                cryptoId: coinId,
+                walletType: 'user',
+                userId: null,
+                address: {
+                    seedIndex: index,
+                    key: childInfo.address,
+                },
+                balanceAmount: 0,
+                status: {
+                    code: "Available"
+                },
+                creationDate: new Date()
+
+            };
+
+
+            if (coin === "Ethereum") {
+                let pubkeyBuffer = childInfo.pubkey,
+                    ethPubkey = ethUtil.importPublic(pubkeyBuffer),
+                    addressBuffer = ethUtil.publicToAddress(ethPubkey),
+                    hexAddress = addressBuffer.toString('hex'),
+                    checksumAddress = ethUtil.toChecksumAddress(`0x${hexAddress}`);
+
+                walletInfo.address.key = ethUtil.addHexPrefix(checksumAddress);
+                // walletInfo.privateKey = ethUtil.addHexPrefix((child.__D).toString('hex'));
+                // walletInfo.pubkey = ethUtil.addHexPrefix(childInfo.pubkey.toString('hex'));
+            }
+
+            walletList.push(walletInfo);
+
+            index = Number(index) + 1;
+
+            if (i === walletRequire - 1) {
+                // walletList.map(obj => console.log(obj, '\n', "------------------------------------"));
+                await saveWallets(cryptoId, walletList, activeNetworks)
+            }
+
+        }
+    } catch (error) {
+        console.log("error", error)
+        saveErrorLog({
+            merchantId: null,
+            transactionId: null,
+            component: "UserWalletManagementService",
+            severity: null,
+            errorCode: error.code ? error.code.toString() : "406",
+            errorMessage: error.message ? "Error in createWallet of user-wallet-service" + error.message : "Error in createWallet of user-wallet-service",
+            postMvpComment: null,
+        })
+        throw new Error(error)
+    }
+
+
+}
+
+const getAddress = async (node, network) => {
+    return await Bitcoin.payments.p2pkh({ pubkey: node.publicKey, network });
+}
+
+const checkForMerchantWalletAndSave = async (walletInfo) => {
+    try {
+        const merchantWallet = await merchantWalletModel.findOne({ "address.key": walletInfo.address.key })
+        if(merchantWallet) return 0
+        else {
+            const uesrWalletInst = new userWalletModel(walletInfo)
+            await uesrWalletInst.save()
+            return 1
+        }
+    } catch(err) {
+        throw err
+    }
+}
+
+const saveWallets = async (cryptoId, walletList, activeNetworks) => {
+    try {
+        let promiseReq = []
+        for (let i = 0; i < walletList.length; i++) {
+            promiseReq.push(await checkForMerchantWalletAndSave(walletList[i]))
+        }
+        
+        let promiseRes = await Promise.all(promiseReq)
+        const walletCount = promiseRes.reduce((partialSum, a) => partialSum + a, 0); 
+        console.log(`Inserted ${walletCount} ${cryptoId} (${activeNetworks}) wallet into DB`);
+        return
+        // let bulk = mongoose.connection.collection('B2CUserWallets').initializeUnorderedBulkOp();
+
+        // for (let i = 0; i < walletList.length; i++) {
+        //     bulk.insert(walletList[i]);
+        // }
+
+        // bulk.execute((err) => {
+        //     if (err) console.log(err)
+        //     console.log(`Inserted ${walletList.length} ${cryptoId} (${activeNetworks}) wallet into DB`);
+        //     return
+        // });
+
+    } catch (error) {
+        console.log("error", error)
+        saveErrorLog({
+            merchantId: null,
+            transactionId: null,
+            component: "UserWalletManagementService",
+            severity: null,
+            errorCode: error.code ? error.code.toString() : "406",
+            errorMessage: error.message ? "Error in saveWallets of user-wallet-service" + error.message : "Error in saveWallets of user-wallet-service",
+            postMvpComment: null,
+        })
+        throw new Error(error)
+    }
+}
+
+const getFastGasPrice = async (api_key) => {
+    try {
+        const response = await axios.get(`${process?.env?.ETHERSCAN_API_URL}/api?module=gastracker&action=gasoracle&apikey=${api_key}`);
+        return response.data.result
+    } catch (error) {
+        saveErrorLog({
+            merchantId: null,
+            transactionId: null,
+            component: "UserWalletManagementService",
+            severity: null,
+            errorCode: error.code ? error.code.toString() : "406",
+            errorMessage: error.message ? "Error in getFastGasPrice of user-wallet-service" + error.message : "Error in getFastGasPrice of user-wallet-service",
+            postMvpComment: null,
+        })
+        throw new Error(error)
+    }
+}
+
+const updateTransactionStatus = async (id, status, msg = '') => {
+    try {
+        const transaction = await userTransactionModel.findOne({ "_id": id })
+        if(transaction) {
+            let { code, message, updated, history } = transaction.status
+            history.push({ code, message, updated })
+            await userTransactionModel.updateOne({ '_id': id }, { 'status.code': status, 'status.message': msg, udpated: new Date(), 'status.history': history, "lastupdatedDate": new Date() })
+        } 
+    } catch(err) {
+        console.log(err)
+        throw err
+    }
+}
+
+const updateWalletBalance = async (fromWallet, transaction, type, deductTransactionFeeSeparatly, transactionFee) => {
+    try {
+        if (fromWallet?.balance?.length > 0) {
+            if (fromWallet.balance.filter((balanceObj) => balanceObj.cryptoId === transaction.cryptoId)?.length > 0) {
+                let balanceList = fromWallet.balance.map((balanceObj) => {
+                    if (balanceObj.cryptoId === transaction.cryptoId) {
+                        if(type === 'sender') {
+                            balanceObj.balanceAmount =  parseFloat(balanceObj?.balanceAmount) - (parseFloat(transaction?.amount) - (deductTransactionFeeSeparatly ? transactionFee : 0));
+                        } else {
+                            balanceObj.balanceAmount = parseFloat(balanceObj?.balanceAmount) + parseFloat(transaction.amount);
+                        }
+                        balanceObj.updated = new Date();
+                        return balanceObj;
+                    } else {
+                        return balanceObj;
+                    }
+                })
+                await userWalletModel.updateOne({ '_id': fromWallet._id }, {
+                    "balance": balanceList,
+                })
+            } else {
+                if(type === 'receiver') {
+                    await userWalletModel.updateOne({ '_id': fromWallet._id }, {
+                        "balance": fromWallet.balance.concat([{
+                            cryptoId: transaction.cryptoId,
+                            balanceAmount: transaction.amount,
+                            updated: new Date(),
+                            cryptoName: fromWallet.blockchain,
+                        }]),
+                    })
+                }
+            }
+        } 
+        else {
+            if(type === 'receiver') {
+                await userWalletModel.updateOne({ '_id': fromWallet._id }, {
+                    "balance": fromWallet.balance.concat([{
+                        cryptoId: transaction.cryptoId,
+                        balanceAmount: transaction.amount,
+                        updated: new Date(),
+                        cryptoName: fromWallet.blockchain,
+                    }]),
+                })
+            }
+        }
+    } catch(err) {
+        console.log(err)
+        throw err
+    }
+}
+
+const saveReceiverTransaction = async (wallet, senderTrans) => {
+    // console.log("saveReceiverTransaction wallet", JSON.stringify(wallet))
+    // console.log("saveReceiverTransaction sendTrans", JSON.stringify(senderTrans))
+    try {
+        const addressData = ethWallet["default"].generate();
+        const transactionId = addressData.getPrivateKeyString();
+        let exchangeRate = await getCryptoExchangeRate(senderTrans.cryptoId, 'USD')
+        // console.log("exchangeRate", exchangeRate)
+
+        const tranactionObj = {
+            transactionId,
+            network: senderTrans.network,
+            ethereumNetwork: senderTrans.ethereumNetwork,
+            createdDate: new Date(),
+            lastupdatedDate: new Date(),
+            status: {
+              code: STATUS_B2C_RECEIVE_COMPLETED,   
+              message: "",
+              updated: new Date(),
+            },
+            amount: senderTrans.amount,
+            USDAmount: exchangeRate * senderTrans.amount,
+            cryptoId: senderTrans.cryptoId,
+            depositHash: senderTrans.hash,
+            type: "receive",
+            fromWallet: senderTrans.fromWallet,
+            toWallet: senderTrans.toWallet,
+            b2cUser: wallet.userId
+        };
+
+        const receiverTrans = new userTransactionModel(tranactionObj)
+        await receiverTrans.save()
+        console.log("receiverTrans ==> ", JSON.stringify(receiverTrans))
+        return receiverTrans
+    } catch(err) {
+        console.log(err)
+    }
+}
+
+const sendAmount = async (seed) => {
+    let transaction = null
+    try {
+        transaction = await userTransactionModel.findOne({ type: 'send', 'status.code': STATUS_B2C_SEND_NEW_REQUEST });
+        if(!transaction) return
+        console.log("transaction ==> ", JSON.stringify(transaction))
+        await updateTransactionStatus(transaction._id, STATUS_B2C_SEND_PROCESSING)
+        if(transaction && transaction.fromWallet && transaction.toWallet) {
+            const fromWallet = await userWalletModel.findOne({ 'address.key': transaction.fromWallet, 'network': transaction.network })
+            if(!fromWallet) throw new Error(" From wallet not found ")
+            let AvailbleBalanceInFromWallet;
+            if(transaction.amount > 0) {
+                const toWallet = await userWalletModel.findOne({ 'address.key': transaction.toWallet, 'network': transaction.network })
+                if(!toWallet) {
+                    const sentResult = await sendAmountToWallet(seed, fromWallet, transaction)
+                    console.log("sentResult => ", JSON.stringify(sentResult))
+                    console.log("Amount sent to wallet")
+                    await updateTransactionStatus(transaction._id, STATUS_B2C_SEND_TO_RECIPIENT)
+                    await updateWalletBalance(fromWallet, transaction, 'sender', sentResult.deductTransactionFeeSeparatly, sentResult.transactionFee)
+                    console.log("sentResult.transactionFee:", sentResult.transactionFee)
+                    await userTransactionModel.updateOne({ '_id': transaction._id }, { gasFee: sentResult.gasFee, transactionFee: sentResult.transactionFee, "lastupdatedDate": new Date()  })
+                    await updateLatestBalance(transaction, sentResult.exactCrypto, 'sender', sentResult.deductTransactionFeeSeparatly, sentResult.transactionFee)
+                    await updateUserBalance(transaction, fromWallet.userId, 'sender', sentResult.deductTransactionFeeSeparatly, sentResult.transactionFee)
+                } else {
+                    if (fromWallet?.balance?.length > 0) {
+                        if (fromWallet.balance.filter((balanceObj) => balanceObj.cryptoId === transaction.cryptoId)?.length > 0) { 
+                            fromWallet.balance.map((balanceObj) => {
+                                if (balanceObj.cryptoId === transaction.cryptoId) {
+                                    AvailbleBalanceInFromWallet = balanceObj?.balanceAmount
+                                }
+                            })
+                        }
+                    }
+                    else {
+                        throw new Error(`Insufficient funds for ${transaction.cryptoId}`)
+                    }
+                    if(AvailbleBalanceInFromWallet < 0) throw new Error(`Insufficient funds for ${transaction.cryptoId}`);
+                    console.log("sending to a cryptonpay wallet");
+                    const receiverTrans = await saveReceiverTransaction(toWallet, transaction)
+                    // console.log("receive transaction", JSON.stringify(receiverTrans))
+                    // console.log("fromWallet", JSON.stringify(fromWallet))
+                    await updateWalletBalance(fromWallet, transaction, 'sender')
+                    await updateWalletBalance(toWallet, transaction, 'receiver')
+                    await updateLatestBalance(transaction, transaction?.amount, 'sender')
+                    await updateLatestBalance(receiverTrans, receiverTrans?.amount, 'receiver')
+                    await updateUserBalance(transaction, fromWallet?.userId, 'sender')
+                    await updateUserBalance(receiverTrans, toWallet?.userId, 'receiver')
+                    await updateTransactionStatus(transaction._id, STATUS_B2C_SEND_TO_RECIPIENT)
+                }
+                await updateTransactionStatus(transaction._id, STATUS_B2C_SEND_COMPLETED)
+                console.log("Send transaction completed")
+            }
+        }
+    } catch(err) {
+        console.log(err)
+        if(transaction) {
+            await updateTransactionStatus( transaction._id, STATUS_B2C_SEND_ERROR, err.message)
+        }
+        throw err
+    }
+}
+
+const updateUserBalance = async (transaction, userId, type, deductTransactionFeeSeparatly, transactionFee) => {
+    try {
+      let cryptoBalance = await userBalanceModel.findOne({ userId, cryptoId: transaction.cryptoId })
+      if(cryptoBalance) {
+        if(type === 'sender') {
+            cryptoBalance.balance.balanceAmount -= (transaction.amount - (deductTransactionFeeSeparatly ? transactionFee : 0))
+        } else {
+            cryptoBalance.balance.balanceAmount += transaction.amount
+        }
+        cryptoBalance.balance.updated = new Date()
+        cryptoBalance.balanceHistory.push({
+          amount: (transaction.amount - (deductTransactionFeeSeparatly && type === 'sender' ? transactionFee : 0)),
+          updated: new Date()
+        })
+        cryptoBalance.lastUpdatedDate = new Date()
+        await userBalanceModel.updateOne({ '_id': cryptoBalance._id }, cryptoBalance)
+      } else {
+        if(type === 'receiver') {
+            cryptoBalance = {
+                userId: transaction.b2cUser,
+                cryptoId: transaction.cryptoId,
+                balance: {
+                  balanceAmount: transaction.amount,
+                  updated: new Date()
+                },
+                balanceHistory: [{
+                  amount: transaction.amount,
+                  updated: new Date()
+                }],
+                creationDate: new Date()
+            }
+            const userBalanceInst = new userBalanceModel(cryptoBalance)
+            await userBalanceInst.save()
+        }
+      }
+    } catch(err) {
+      console.log(err)
+      throw err
+    }
+  }
+
+const updateLatestBalance = async (transaction, exactCrypto, type, deductTransactionFeeSeparatly, transactionFee) => {
+    try {
+      let tradeAPI = "aquanow";
+      const exchangeRate = await axios.get(getTradeRateURL(transaction.cryptoId, "USD", tradeAPI))
+      const btcExchangeRate = await axios.get(getTradeRateURL("BTC", "USD", tradeAPI))
+      let usdAmount = transaction.amount * parseFloat(getTradeRatePrice(transaction.cryptoId, "USD", exchangeRate, tradeAPI))
+      let usdFeeAmount = transactionFee ? (transactionFee * parseFloat(getTradeRatePrice(transaction.cryptoId, "USD", exchangeRate, tradeAPI))) : 0
+      let btcAmount = usdAmount / parseFloat(getTradeRatePrice("BTC", "USD", btcExchangeRate, tradeAPI))
+      let btcFeeAmount = usdFeeAmount ? (usdFeeAmount / parseFloat(getTradeRatePrice("BTC", "USD", btcExchangeRate, tradeAPI))) : 0
+      if(type === 'sender' && deductTransactionFeeSeparatly && transactionFee) { 
+        usdAmount = usdAmount - usdFeeAmount
+        btcAmount = btcAmount - btcFeeAmount
+        exactCrypto = exactCrypto - transactionFee
+      }
+        let lastTransaction = await userTransactionModel.findOne({
+            $or: [
+                { 'status.code': STATUS_B2C_RECEIVE_COMPLETED },
+                { 'status.code': B2C_STATUS_BUY_COMPLETED },
+                { 'status.code': STATUS_B2C_SEND_COMPLETED }],
+            "b2cUser": transaction.b2cUser._id
+        }).sort({ createdDate: -1 })
+      console.log("usdAmount, btcAmount", usdAmount, btcAmount)
+      console.log("usdFeeAmount, btcFeeAmount", usdFeeAmount, btcFeeAmount)
+      console.log("lastTransaction", JSON.stringify(lastTransaction))
+      if(lastTransaction && lastTransaction.overallBalance && 
+            lastTransaction.overallBalance.usdAmount && lastTransaction.overallBalance.btcAmount) {
+        if(type === 'sender') {
+            usdAmount = lastTransaction.overallBalance.usdAmount - usdAmount
+            btcAmount = lastTransaction.overallBalance.btcAmount - btcAmount
+        } else {
+            usdAmount = lastTransaction.overallBalance.usdAmount + usdAmount
+            btcAmount = lastTransaction.overallBalance.btcAmount + btcAmount
+        }
+      } else {
+        let cryptoBalance = await userBalanceModel.find({ userId: transaction.b2cUser })
+        let coins = cryptoBalance.map(crypto => crypto.cryptoId)
+        const exchangeRates = await ExchangeRateCacheModel.find({ baseCurrency: { $in: coins } }, { baseCurrency: 1, ask: 1 })
+        let totalUsd = 0
+        cryptoBalance.map(crypto => {
+            const exchangeValue = exchangeRates.filter(rate => rate.baseCurrency == crypto.cryptoId)
+            totalUsd += crypto.balance.balanceAmount * exchangeValue[0].ask
+        })
+        if(cryptoBalance && cryptoBalance.length > 0) {
+            if(type === 'sender') {
+                usdAmount = totalUsd - usdAmount
+                btcAmount = (usdAmount / parseFloat(getTradeRatePrice("BTC", "USD", btcExchangeRate, tradeAPI))) - btcAmount 
+            } else {
+                usdAmount = totalUsd + usdAmount
+                btcAmount = (usdAmount / parseFloat(getTradeRatePrice("BTC", "USD", btcExchangeRate, tradeAPI))) + btcAmount 
+            }       
+        }
+      }
+      console.log("usdAmount, btcAmount", usdAmount, btcAmount)
+      await userTransactionModel.updateOne({ '_id': transaction._id }, { lastupdatedDate: new Date(), overallBalance: { usdAmount, btcAmount }, 
+                    actualAmount: { crypto: exactCrypto, usd: exactCrypto * parseFloat(getTradeRatePrice(transaction.cryptoId, "USD", exchangeRate, tradeAPI)) } })
+      return
+    } catch(err) {
+      console.log(err)
+      throw err
+    }
+  }
+
+const sendAmountToWallet = async (phrase, fromWallet, transaction) => {
+    let tx = {}
+    try {
+        let { blockchain, network, address, cryptoId } = fromWallet
+        let txAmount = transaction.amount
+        let activeBlockchain = networks.filter(obj => obj.blockchain === blockchain && obj.networkType === network)[0]
+        let derivationPath = derivationPaths.filter(obj => obj.coin === blockchain && obj.network === network)
+        const seed = await generateSeed(phrase);
+        const root = await bip32RootKey(seed, activeBlockchain.network);
+        let walletDetails = await generateWallet(root, derivationPath, address.seedIndex, activeBlockchain, blockchain, cryptoId)
+        if(transaction?.cryptoId === "XRP") {
+            return await rippleTransaction(fromWallet, walletDetails, receiverAddress, txAmount, network, address, transaction,phrase,derivationPath)
+        }
+        if (blockchain === "Ethereum") {    
+            let transNetwork = null
+            if(transaction.network === 'testnet' || transaction.network === 'goerli') {
+                transNetwork = 'goerli'
+            } else transNetwork = 'mainnet'
+            const provider = new ethers.JsonRpcProvider(`https://${transNetwork}.infura.io/v3/${process?.env?.JSONRPC_INFURA_PROJECTID}`);
+            const ethGasPrice = await getFastGasPrice(process.env.ETH_GASCHECK_API_KEY)
+            console.log("ethGasPrice", ethGasPrice.FastGasPrice)
+
+            const ethTxFee = (21000 * ethGasPrice.FastGasPrice) / 1000000000
+            // let withdrawlAmt = (txAmount - (txAmount * (withdrawalSpread / 100))) - ethTxFee
+            let withdrawlAmt = txAmount - ethTxFee
+            const depositSpreadForSend = 1
+            const transactionFee = ((depositSpreadForSend / 100) * withdrawlAmt) 
+            console.log("checks: withdrawlAmt, transactionFee",withdrawlAmt,",",transactionFee)
+            let cryptoBalance = await userBalanceModel.findOne({ userId: fromWallet.userId, cryptoId: transaction.cryptoId })
+            // console.log({txAmount, withdrawlAmt, ethTxFee, transactionFee, "cryptoBalance": cryptoBalance.balance.balanceAmount})
+            let deductTransactionFeeSeparatly = false
+            if(!cryptoBalance) {
+                throw new Error("crypto-balance not found!")
+            } else {
+                if ((withdrawlAmt + transactionFee) > cryptoBalance.balance.balanceAmount) {
+                    withdrawlAmt = withdrawlAmt - transactionFee;
+                } else {
+                    deductTransactionFeeSeparatly = true
+                }
+            }
+
+            tx = {
+                to: transaction.toWallet.trim(),
+                value: ethers.parseEther(withdrawlAmt.toFixed(10).toString()),
+            }
+            const account_from = {
+                privateKey: walletDetails.privateKey
+            };
+            let wallet = new ethers.Wallet(account_from.privateKey, provider);
+            
+            const createReceipt = await wallet.sendTransaction(tx);
+            const createReceiptWait = await createReceipt.wait();
+            let { transactionHash } = createReceipt
+            const balanceFrom = ethers.formatEther(
+                await provider.getBalance(fromWallet.address.key)
+            );
+            // console.log({balanceFrom})
+            // await walletModel.updateOne({ "_id": fromWallet._id }, { $set: { balanceAmount: balanceFrom } })
+            let actualGasPrice = (Number(ethers.formatUnits(createReceiptWait.effectiveGasPrice, "gwei")) * createReceiptWait.cumulativeGasUsed) / 1000000000
+            // let txDtls = {
+            //     withdrawl_fiat_amount: data.depositAmount,
+            //     withdrawl_fiat_crypto_amount: txAmount,
+            //     withdraw_crypto_currency: "ETH",
+            //     fiat_crypto_exchange_rate: exchangeAmount.price,
+            //     withdrawl_spread: withdrawalSpread,
+            //     expected_gas_price: ethTxFee,
+            //     amount_transferred: withdrawlAmt,
+            //     actual_gas_price: actualGasPrice,
+            //     transactionHash: transactionHash,
+            //     cumulativeGasUsed: Number(ethers.utils.formatUnits(createReceiptWait.cumulativeGasUsed)),
+            //     effectiveGasPrice: Number(ethers.utils.formatUnits(createReceiptWait.effectiveGasPrice, "gwei"))
+            // }
+            return { exactCrypto: withdrawlAmt, deductTransactionFeeSeparatly, transactionFee, gasFee: parseFloat(ethTxFee.toFixed(6)) }
+        } else {
+            return await bitcoinTransaction(fromWallet, walletDetails, transaction, network, address)
+        }
+    } catch(err) {
+        console.log(err)
+        throw err
+    }
+}
+
+const bitcoinTransaction = async (walletInfo, walletDetails, txn, network, address) => {
+    try {
+        const receiverAddress = txn.toWallet
+        const txAmount = txn.amount
+        let apiNetwork; 
+        if(txn?.cryptoId === "LTC") {
+            apiNetwork =  "litecoin";
+        }
+        else {
+            apiNetwork = network === 'mainnet' ? "bitcoin" : "bitcoin/testnet";
+            
+        }
+        const privateKey = walletDetails.privateKey;
+        const sourceAddress = address.key;
+        let satoshiToSend = txAmount * 100000000;
+
+        let fee = 0;
+        let inputCount = 0;
+        let outputCount = 2;
+        const account = await axios.get(
+            `${process?.env?.BLOCKCHAIR_API_URL}/${apiNetwork}/dashboards/address/${sourceAddress}?key=${process?.env?.BLOCKCHAIR_API_KEY}`
+        );
+        
+        // console.log({account});
+
+        let transaction;
+        
+        if(txn?.cryptoId === "LTC") {
+            transaction = new litecore.Transaction()
+        }
+        else {
+            transaction = new bitcore.Transaction()
+        }
+        let totalAmountAvailable = 0;
+
+        let inputs = [];
+        account.data.data[sourceAddress].utxo.forEach(async (element) => {
+            let utxo = {};
+            utxo.satoshis = element.value;
+            utxo.script = account.data.data[sourceAddress].address.script_hex;
+            utxo.address = sourceAddress;
+            utxo.txId = element.transaction_hash;
+            utxo.outputIndex = element.index;
+            totalAmountAvailable += utxo.satoshis;
+            inputCount += 1;
+            inputs.push(utxo);
+        });
+        let transactionSize = inputCount * 146 + outputCount * 34 + 10 - inputCount;
+        // const feesRes = await axios.get(
+        //     `https://bitcoinfees.earn.com/api/v1/fees/recommended`
+        // );
+        // fee = transactionSize * parseInt( feesRes.data.fastestFee / 10  )
+        const options = {
+            method: 'GET',
+            headers: {
+                accept: 'application/json',
+                'X-API-Key': process?.env?.BLOCKDAEMON_GASFEE_ESTIMATE_API_KEY
+            }
+        };
+        const feesRes = await axios
+            .get(
+                `${process?.env?.BLOCKDAEMON_GASFEE_ESTIMATE_API_URL}/universal/v1/bitcoin/mainnet/tx/estimate_fee`,
+                options
+            )
+            .catch((err) => console.error(err));
+
+        if (feesRes.data.estimated_fees.fast > 200) {
+            throw new Error("Fee too high ", feesRes.data.estimated_fees.fast)
+        }
+        fee = transactionSize * parseInt(feesRes.data.estimated_fees.fast)
+       
+        let exactCryptoValue = (satoshiToSend + fee) / 100000000;
+        const depositSpreadForSend = 1
+        const transactionFee = ((depositSpreadForSend / 100) * exactCryptoValue) 
+        let cryptoBalance = await userBalanceModel.findOne({ userId: walletInfo.userId, cryptoId: txn.cryptoId })
+        // console.log({cryptoBalance})
+        let deductTransactionFeeSeparatly = false
+        if(!cryptoBalance) {
+            throw new Error("crypto-balance not found!")
+        } else {
+            if ((exactCryptoValue + transactionFee) > cryptoBalance.balance.balanceAmount) {
+                satoshiToSend = satoshiToSend - (transactionFee * 100000000);
+                exactCryptoValue = exactCryptoValue - transactionFee;
+            } else {
+                deductTransactionFeeSeparatly = true
+            }
+        }
+
+        if (totalAmountAvailable - satoshiToSend - fee < 0) {
+            throw new Error("Balance is too low for this transaction");
+        }
+
+        transaction.from(inputs);
+        transaction.to(receiverAddress, parseInt(satoshiToSend));
+        transaction.change(sourceAddress);
+        transaction.fee(fee);
+        transaction.sign(privateKey);
+
+        const serializedTransaction = transaction.serialize();
+        const result = await axios({
+            method: "POST",
+            url: `${process?.env?.BLOCKCHAIR_API_URL}/${apiNetwork}/push/transaction?key=${process?.env?.BLOCKCHAIR_API_KEY}`,
+            data: {
+              data: serializedTransaction,
+            },
+        });
+
+        // const confirmTransaction = await axios({
+        //     method: "GET",
+        //     url: `https://chain.so/api/v2/is_tx_confirmed/${sochain_network}/${result.data.data.txid}`,
+        // });
+        const receipt = await axios({
+            url: `${process?.env?.BLOCKCHAIR_API_URL}/${apiNetwork}/raw/transaction/${result.data.data.transaction_hash}?key=${process?.env?.BLOCKCHAIR_API_KEY}`,
+        });
+        const createReceiptWait = receipt.data.data
+
+        createReceiptWait.status = 1;
+
+        // let txDtls = {
+        //     withdrawl_fiat_amount: data.depositAmount,
+        //     withdrawl_fiat_crypto_amount: txAmount,
+        //     withdraw_crypto_currency: "BTC",
+        //     fiat_crypto_exchange_rate: exchangeAmount.price,
+        //     withdrawl_spread: withdrawalSpread,
+        //     expected_gas_price: createReceiptWait.fee,
+        //     amount_transferred: satoshiToSend,
+        //     actual_gas_price: createReceiptWait.fee,
+        //     transactionHash: createReceiptWait.tx_hex,
+        //     cumulativeGasUsed: null,
+        //     effectiveGasPrice: null
+        // }
+
+        // const updatedAccount = await axios.get(
+        //     `https://api.blockchair.com/${apiNetwork}/dashboards/address/${sourceAddress}?key=B___To7hHMmzcDlC2acRPvU5ywYEQciW`
+        // );
+
+        // await walletModel.updateOne({ "_id": walletInfo._id }, { $set: { balanceAmount: updatedBalance.data.data.confirmed_balance } })
+        return { exactCrypto: exactCryptoValue, deductTransactionFeeSeparatly, transactionFee, gasFee: fee }
+
+    } catch (error) {
+        console.log("error in bitcoin transaction", error)
+        throw new Error(error)
+    }
+};
+
+const rippleTransaction = async (walletSource, walletDetails, receiverAddress, txAmount, network, address, transData,phrase,derivationPath) => {
+    try {
+        let merchantId = new mongoose.mongo.ObjectId(transData.merchant);
+        let merchants = await merchantsModel.findOne({ "_id":merchantId})
+        let withdrawalSpread = 1;
+        if(merchants){
+            if(merchants.paymentProvider){
+                const paymentSettings = await getPaymentProviderSettings(merchants.paymentProvider._id ? merchants.paymentProvider._id.toString():merchants.paymentProvider.toString());
+                    merchants.withdrawalSpread = parseFloat((merchants?.withdrawalSpread ? merchants?.withdrawalSpread : 0) + (paymentSettings?.withdrawalSpread ? paymentSettings?.withdrawalSpread : 0));
+            }
+            withdrawalSpread = merchants.withdrawalSpread;
+        }
+        await axios.get(`${process?.env?.BLOCKCHAIR_API_URL}/ripple/raw/account/${address.key}?key=${process?.env?.BLOCKCHAIR_API_KEY}&assets=true&transactions=true`,
+        {
+            headers: {
+                'Accept': 'application/json',
+            }
+        }).then(async function (response) {
+            let xrpAccount = response.data.data
+            // console.log("response",JSON.stringify(xrpAccount));
+            let balance = xrpAccount[address.key].account.account_data.Balance;
+            // console.log("transactions",transactions);
+
+        const client = new xrpl.Client('wss://xrplcluster.com')
+        await client.connect()
+        // console.log("seed",seed);
+        // let seedBase58 = xrpl.encodeXAddress(seed);
+        // console.log("seedBase58",seedBase58);
+        const path = `${derivationPath[0].path}/${address.seedIndex}`;
+        let opts = {
+            masterAddress : address.key,
+            derivationPath:path
+        }
+        const wallet = xrpl.Wallet.fromMnemonic(phrase,opts)
+        // for transfer we don't use  transactionFee or withdrawalSpread from actulAmountSent
+        // let satoshiToSend = (txAmount - (txAmount * (withdrawalSpread / 100))) * 1000000;
+        let satoshiToSend = txAmount * 1000000;
+        let amountSent = parseInt(satoshiToSend).toString();
+        const prepared = await client.autofill({
+            "TransactionType": "Payment",
+            "Account": address.key,
+            "Amount": amountSent,
+            "Destination": receiverAddress
+        })
+        const max_ledger = prepared.LastLedgerSequence
+        // for transfer we don't deduct fee from actulAmountSent
+        // satoshiToSend = parseFloat(satoshiToSend) - parseFloat(prepared.Fee);
+        satoshiToSend = parseFloat(satoshiToSend);
+        if (parseFloat(balance) - satoshiToSend - parseFloat(prepared.Fee) < 0) {
+            throw new Error("Balance is too low for this transaction");
+        }
+        let exactCryptoValue = (satoshiToSend + parseFloat(prepared.Fee)) / 100000000;
+        const transactionFee = ((withdrawalSpread / 100) * exactCryptoValue) 
+
+        let cryptoBalance = await userBalanceModel.findOne({ userId: walletSource?.userId, cryptoId: transData?.cryptoId })
+        let deductTransactionFeeSeparatly = false
+        if(!cryptoBalance) {
+            throw new Error("crypto-balance not found!")
+        } else {
+            if ((exactCryptoValue + transactionFee) > cryptoBalance.balance.balanceAmount) {
+                satoshiToSend = satoshiToSend - (transactionFee * 100000000);
+                exactCryptoValue = exactCryptoValue - transactionFee;
+            } else {
+                deductTransactionFeeSeparatly = true
+            }
+        }
+
+        if (totalAmountAvailable - satoshiToSend - fee < 0) {
+            throw new Error("Balance is too low for this transaction");
+        }
+        const signed = wallet.sign(prepared)
+
+        const tx = await client.submitAndWait(signed.tx_blob)
+        let createReceiptWait = {};
+        createReceiptWait.status = 1;
+        let txDtls = {
+            withdrawl_fiat_amount: transData.depositAmount,
+            withdrawl_fiat_crypto_amount: txAmount,
+            withdraw_crypto_currency: "XRP",
+            withdrawl_spread: withdrawalSpread,
+            amount_transferred: satoshiToSend / 1000000,
+            cumulativeGasUsed: null,
+            effectiveGasPrice: null,
+        }
+        setTimeout(async () => {
+            txDtls.transactionHash = tx.result.hash;
+            txDtls.expected_gas_price = tx.result.Fee,
+            txDtls.actual_gas_price = tx.result.Fee / 1000000
+        let currBalance = tx.result.meta.AffectedNodes[0].ModifiedNode.FinalFields.Balance;
+        currBalance = parseFloat(currBalance)/1000000
+        }, 10000);
+        client.disconnect()        
+        return { exactCrypto: exactCryptoValue, deductTransactionFeeSeparatly, transactionFee, gasFee: txDtls.actual_gas_price }
+    })
+    } catch (error) {
+        console.log("error", error)
+        throw new Error(error)
+    }
+};
+
+module.exports = { createUserWallets, sendAmount }

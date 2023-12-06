@@ -1,0 +1,117 @@
+const AWS = require("aws-sdk");
+const docClient = new AWS.DynamoDB.DocumentClient();
+
+exports.handler = async (event) => {
+  const { register_id, registered_match_id, match_id } = event;
+
+  if (registered_match_id) {
+    const params = {
+      TableName: "registered_matches",
+      KeyConditionExpression:
+        "register_id = :register_id AND registered_match_id = :registered_match_id",
+      ExpressionAttributeValues: {
+        ":registered_match_id": registered_match_id,
+        ":register_id": register_id,
+      },
+    };
+    try {
+      const data = await docClient.query(params).promise();
+      if (data.Items.length > 0) {
+        return {
+          statusCode: 200,
+          message: "Data retrieved successfully",
+          data: data.Items,
+        };
+      }
+    } catch (error) {
+      console.error(error);
+      return {
+        statusCode: 500,
+        error: true,
+        message: "Error occurred while retrieving data",
+      };
+    }
+  }
+
+  const registertMatchDetails = await getRegisterMatchDetailsByMatchId(
+    register_id,
+    match_id
+  );
+  if (registertMatchDetails.Count == 0) {
+    const matchDetails = await getMainMatchDetails(match_id);
+    const match = matchDetails.Items[0];
+
+    if (matchDetails && matchDetails.Count > 0) {
+      const insertParams = {
+        TableName: "registered_matches",
+        Item: {
+          register_id: register_id,
+          registered_match_id: "reg-" + new Date().valueOf(),
+          match_id: match_id,
+          team1: match.team1,
+          team2: match.team2,
+          gender: match.gender,
+          client_name: match.client_name,
+          game_object: match.game_object,
+          series_name: match.series_name,
+          sport_name: match.sport_name,
+          stadium: match.stadium,
+          matchTimeStamp: match.matchTimeStamp,
+          match_place: match.match_place,
+        },
+      };
+
+      try {
+        await docClient.put(insertParams).promise();
+        return {
+          statusCode: 200,
+          message: "Data created successfully",
+          data: insertParams.Item,
+        };
+      } catch (error) {
+        console.error(error);
+        return {
+          statusCode: 500,
+          error: true,
+          message: "Error occurred while creating data",
+        };
+      }
+    } else {
+      return {
+        statusCode: 404,
+        message: "Match details not found",
+        error: true,
+      };
+    }
+  } else {
+    return {
+      statusCode: 200,
+      message: "Data retrieved successfully",
+      data: registertMatchDetails.Items,
+    };
+  }
+};
+
+const getRegisterMatchDetailsByMatchId = (register_id, match_id) => {
+  const query = {
+    TableName: "registered_matches",
+    FilterExpression: "match_id=:match_id",
+    KeyConditionExpression: "register_id =:register_id",
+    ExpressionAttributeValues: {
+      ":register_id": register_id,
+      ":match_id": match_id,
+    },
+  };
+  return docClient.query(query).promise();
+};
+const getMainMatchDetails = (match_id) => {
+  const query = {
+    TableName: "offline_matches",
+    FilterExpression: "match_id =:match_id",
+    ExpressionAttributeValues: {
+      ":match_id": match_id,
+    },
+  };
+  return docClient.scan(query).promise();
+};
+

@@ -1,0 +1,9 @@
+Example calculation (based on https://shasta.tronscan.org/#/transaction/151ad027ade4162f6be5970faf1bc169af08a84b65910998cf1058d63cf444e5): for make contract transaction you must pay 345 bandwidth and 13045 energy. Cost of bandwidth - 1000 SUN, as result, we must pay 0.345 TRX (345 * 1000 / 1000000). Cost of energy - 420 SUN, as result we must pay - 5.4789 TRX (13045 * 420 / 1000000). Total fee about transaction - 0.345 TRX + 5.4789 TRX = 5.8239 TRX.
+
+Also, you can calculate full fee before broadcast transaction:
+
+For bandwidth - https://developers.tron.network/docs/faq#5-how-to-calculate-the-bandwidth-and-energy-consumed-when-calling-the-contract
+For energy - https://developers.tron.network/reference/estimateenergy-2
+
+0.121
+

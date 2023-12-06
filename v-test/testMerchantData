@@ -1,0 +1,66 @@
+{
+    "_id" : ObjectId("612a8252fd75eeaf6e8c4adb"),
+    "merchantId" : "1",
+    "name" : "testmerchant",
+    "companyId" : "",
+    "merchantUserId" : "1mUsrId",
+    "apiKey" : "CorrectSecretKey",
+    "testApiKey" : {
+        "key" : "4c70dbb3-4260-4f58-829f-61003b669c48",
+        "createdDate" : ISODate("2021-09-06T03:51:25.897Z")
+    },
+    "prodApiKey" : {
+        "key" : "728767fb-63cd-4564-81bc-3a8d36026113",
+        "createdDate" : ISODate("2021-09-06T03:51:25.898Z")
+    },
+    "lockingPeriod" : "10",
+    "activitation" : true,
+    "activitationDate" : ISODate("2021-08-28T18:37:06.720Z"),
+    "contacts" : [ 
+        ObjectId("611fa8259db846cf15b0eff9")
+    ],
+    "redirectUrl" : "PPRedirectURL",
+    "callbackUrls" : {
+        "billingAgreement" : "cbkbillingagreement"
+    },
+    "lastMerchantTransactionId" : "Last Merchant Transaction Id",
+    "lastSettlementTransferId" : "Last Settlement Transfer Id",
+    "cryptos" : [ 
+        ObjectId("619cbcf77e3c1ec6e774aed8"), 
+        ObjectId("62136277d54c603f4a30968c"), 
+        ObjectId("612a8252fd75eeaf6e8c4ae0"), 
+        ObjectId("62456a72ff46983ce2656fff"), 
+        ObjectId("62a82e0d47dd8b69eeef902f"), 
+        ObjectId("612a8252fd75eeaf6e8c4adf"), 
+        ObjectId("64c0be933981d62af24dbb80"), 
+        ObjectId("6183bafbb8dbb9c681dc3cf8"), 
+        ObjectId("65245bd6506d53c922527c1b")
+    ],
+    "supportEmail" : "support@test2",
+    "__v" : 8110,
+    "revealedDate" : "2021-09-06T08:05:19.021+00:00",
+    "kytRequired" : false,
+    "creditLimit" : 100,
+    "depositSpread" : 1,
+    "withdrawalSpread" : 1,
+    "depositTransactionFee" : 0.5,
+    "withdrawalTransactionFee" : 0.5,
+    "acceptExactAmountsOnly" : true,
+    "rateExpiryPeriod" : "5",
+    "userWalletActive" : true,
+    "merchantWalletActivation" : true,
+    "paymentProvider" : ObjectId("634fbc5a603d2b1171c89892"),
+    "twoFA" : {
+        "enabled" : false,
+        "encoding" : "",
+        "secret" : null
+    },
+    "creditCardActive" : true,
+    "depositByCardFee" : 1,
+    "depositByCardFixedFee" : 1,
+    "cardReservePercent" : 10,
+    "cardReservePeriod" : 90,
+    "cardSettlementPeriod" : 5,
+    "merchantWithdrawalAutoApproval" : true,
+    "cardAcquireRouting" : "642535eefb465823cd680f93"
+}

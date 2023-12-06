@@ -1,0 +1,55 @@
+const AWS = require('aws-sdk');
+const docClient = new AWS.DynamoDB.DocumentClient();
+
+exports.handler = async (event) => {
+  const { register_id,refferal_id } = event;
+
+  const params = {
+    TableName: 'offline_refferal',
+    KeyConditionExpression: 'register_id = :register_id',
+    ExpressionAttributeValues: {':register_id':register_id }
+  };
+  try {
+     const data = await docClient.query(params).promise();
+    
+     const refferalData = await getreferalData(register_id,refferal_id);
+     if(refferalData.count>0){
+        return {
+        statusCode: 400,
+        message: 'Invalid id'
+      };
+     }
+    const items = data.Items.map((item)=> {
+      return {
+        refferal_id: item.refferal_id,
+        total_amount:item.total_amount,
+        referral_name:item.referral_name
+      };
+    });
+
+    return {
+      statusCode: 200,
+      message: 'Data retrieved successfully',
+      data: items,
+    };
+ } catch (error) {
+        console.error(error);
+        return {
+            statusCode: 500,
+            error: 'true',
+            message: `Error occurred while retrieving data`,
+        };
+    }
+};
+const getreferalData = (register_id,refferal_id) => {
+  const query = {
+    TableName: 'offline_users',
+    KeyConditionExpression: `register_id = :register_id`,
+    FilterExpression:'refferal_id = :refferal_id',
+    ExpressionAttributeValues: { 
+      ':register_id': register_id, 
+      ':refferal_id':refferal_id
+    }
+  };
+  return docClient.query(query).promise();
+};

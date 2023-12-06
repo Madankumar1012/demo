@@ -1,0 +1,856 @@
+import mongoose from 'mongoose';
+import { activityTracking, checkForMerchantLedgerBalance, GetCryptoExchangeRateFTX, updatebalanceHistroy } from "../common/commonService.js";
+import { b2cUserTransactionsModel } from "../db/models/b2cUserTransactions.js";
+import { b2cUserWalletModel } from "../db/models/b2cUserWallets.js";
+import { cryptoModel } from "../db/models/crypto.js";
+import { merchantBalancesModel } from "../db/models/merchantBalances.js";
+import { merchantsModel } from "../db/models/merchants.js";
+import { merchantTransactionModal } from "../db/models/merchantTransactions.js";
+import { merchantWalletsModel } from "../db/models/merchantWallets.js";
+import { transactionModel } from "../db/models/transactions.js";
+import { walletModel } from "../db/models/wallet.js";
+import { getPaymentProviderSettings } from "../DAOServices/paymentProvidersDAO.js";
+import {
+    // STATUS_MERCHANT_WITHDRAWL_BALANCE_REJECT,
+    STATUS_MERCHANT_WITHDRAWL_COMPLETED, STATUS_MERCHANT_WITHDRAWL_CONFIRMED, STATUS_MERCHANT_WITHDRAWL_ERROR, STATUS_NOTIFY_MERCHANT,
+    STATUS_NOTIFY_MERCHANT_FAILED, STATUS_PROCESSING_MERCHANT_WITHDRAWL, STATUS_SEND_TO_RECIPIENT_WALLET,
+    STATUS_SETTLEMENT_TRADE_EXECUTING, STATUS_SOURCE_MERCHANT_WITHDRAWL_WALLET, STATUS_UNABLE_TO_SOURCE_MERCHANT_WITHDRAWL_WALLET
+} from '../status.js';
+import {
+    addBalanceToB2CWallet, executeFTXBuyTrade,
+    getCryptoNameForCryptoId, getFastGasPrice, getWalletInfoList, walletTransactions
+} from "./walletTransaction.js";
+
+import ethWallet from "ethereumjs-wallet";
+import { getTradeRatePrice, getTradeRateURL } from "../common/commonService.js";
+import {
+    GetCryptoOrAmountExchangeRate,
+    getLatestOverallBalance
+} from "../DAOServices/b2cTransactionDAO.js";
+import { call } from '../helper/RestClient.js';
+import { saveErrorLog } from "../services/errorLogService.js";
+import { getMerchantEmailAddress } from "../DAOServices/merchantDAO.js";
+import { sendEmail } from "../services/mail-service.js";
+import { ADMIN_EMAIL } from "../constants/index.js";
+import { getCryptotById } from '../DAOServices/cryptoDAO.js';
+import { getSingleWallet, updateSingleWallet } from '../DAOServices/walletDAO.js';
+
+const updateMerchantWalletBalance = async (transaction, walletId, flag) => {
+    const totalAmountDeducted = flag === "trc20" ?  parseFloat(transaction?.selected?.actualAmountSent) : parseFloat(transaction?.selected?.actualAmountSent) + parseFloat(transaction?.gasFee);
+    try {
+        const cryptoName = getCryptoNameForCryptoId(transaction.selected.cryptoId);
+        const walletCond = { "_id": new mongoose.mongo.ObjectId(walletId) }
+        const wallet = await walletModel.findOne(walletCond);
+        let updatedBalanceHistroy = []
+        if (wallet && wallet.balance && wallet.balance.length > 0) {
+            //update balance history
+            let oldBalance = await updatebalanceHistroy(wallet, transaction)
+            updatedBalanceHistroy = [oldBalance, ...wallet.balanceHistory]
+            console.log("+++++++++++wallet.balance present+++++++++")
+            if (wallet.balance.filter((balanceObj) => balanceObj.cryptoId === transaction.selected.cryptoId).length > 0) {
+                let totalUSDApproxBalance = 0;
+                let balanceList = wallet.balance.map(async (balanceObj) => {
+                    if (balanceObj.cryptoId === transaction.selected.cryptoId) {
+                        // console.log("prev balanceObj.balanceAmount", balanceObj.balanceAmount)
+                        // console.log("transaction.selected.actualAmountSent", transaction.selected.actualAmountSent)
+                        // console.log("transaction.gasFee", transaction.gasFee)
+                        balanceObj.balanceAmount = (balanceObj.balanceAmount ? parseFloat(balanceObj.balanceAmount) : 0) - totalAmountDeducted;
+                        // console.log("new balanceObj.balanceAmount", balanceObj.balanceAmount)
+                        balanceObj.updated = new Date();
+                        balanceObj.cryptoName = cryptoName;
+                        let usdAmount = await GetCryptoExchangeRateFTX(balanceObj.cryptoId, balanceObj.balanceAmount, "USD", true)
+                        balanceObj.balanceAmountUSDApprox = parseFloat(usdAmount[balanceObj.cryptoId]);
+                        totalUSDApproxBalance = totalUSDApproxBalance + balanceObj.balanceAmountUSDApprox;
+                        return balanceObj;
+                    } else {
+                        return balanceObj;
+                    }
+                })
+                balanceList = await Promise.all(balanceList)
+                await walletModel.updateOne(walletCond, {
+                    $set: {
+                        "balance": balanceList,
+                        "balanceAmountUSDApprox": totalUSDApproxBalance,
+                        "balanceHistory": updatedBalanceHistroy,
+                    }
+                })
+            } else {
+                throw new Error("Balance is not found to deduct withdrawal amount")
+            }
+        } else {
+            throw new Error("Balance is not found to deduct withdrawal amount")
+        }
+    } catch (error) {
+        console.log("wallet error=====")
+        console.log(error)
+        throw error;
+    }
+};
+
+const updateMerchantWalletBalanceForTRC20 = async (transaction, walletId, resourcesConsumedFee, deductedCrypto) => {
+    try {
+        const cryptoName = getCryptoNameForCryptoId(deductedCrypto);
+        const walletCond = { "_id": new mongoose.mongo.ObjectId(walletId) }
+        const wallet = await getSingleWallet(walletCond);
+        let updatedBalanceHistroy = []
+        if (wallet && wallet.balance && wallet.balance.length > 0) {
+            const oldBalance = await updatebalanceHistroy(wallet, transaction, deductedCrypto)
+            updatedBalanceHistroy = [oldBalance, ...wallet.balanceHistory]
+            if (wallet.balance.filter((balanceObj) => balanceObj.cryptoId === deductedCrypto).length > 0) {
+                let totalUSDApproxBalance = 0;
+                let balanceList = wallet.balance.map(async (balanceObj) => {
+                    if (balanceObj.cryptoId === deductedCrypto) {
+                        balanceObj.balanceAmount = (balanceObj.balanceAmount ? parseFloat(balanceObj.balanceAmount) : 0) - parseFloat(resourcesConsumedFee ? resourcesConsumedFee : 0);
+                        balanceObj.updated = new Date();
+                        balanceObj.cryptoName = cryptoName;
+                        let usdAmount = await GetCryptoExchangeRateFTX(balanceObj.cryptoId, balanceObj.balanceAmount, "USD", true)
+                        balanceObj.balanceAmountUSDApprox = parseFloat(usdAmount[balanceObj.cryptoId]);
+                        totalUSDApproxBalance = totalUSDApproxBalance + balanceObj.balanceAmountUSDApprox;
+                        return balanceObj;
+                    } else {
+                        return balanceObj;
+                    }
+                })
+                balanceList = await Promise.all(balanceList)
+                await updateSingleWallet(walletCond, {
+                    $set: {
+                        "balance": balanceList,
+                        "balanceAmountUSDApprox": totalUSDApproxBalance,
+                        "balanceHistory": updatedBalanceHistroy,
+                    }
+                })
+            }
+        }
+    } catch (error) {
+        throw error;
+    }
+};
+
+export const manageMerchantWallets = async (phrase, minWalletCapacityThreshold) => {
+    const withdrawlWallets = await merchantTransactionModal.find({
+        "selected.cryptoId": { $exists: true }, "depositAmount": { $exists: true },
+        "depositFiatCurrency": { $exists: true }, "withdrawalWalletAddress": { $exists: true },
+        "type": "Withdrawal", "status.code": "MerchantWithdrawalFlow:ApprovedForProcessing"
+    }).sort({ createdDate: -1 }).populate("merchant");
+
+
+    for (let i = 0; i < withdrawlWallets.length; i++) {
+        let activity = {}
+        let baseActivity = {
+            EventPage: "MerchantWithdrawalFlow",
+        };
+        let data = withdrawlWallets[i],
+            cryptoId = data.selected.cryptoId,
+            { code, message } = data.status,
+            { _id, merchantId, withdrawalWalletAddress, depositAmount, depositFiatCurrency, transactionId, selected, merchant } = data;
+
+
+        let newId = new mongoose.mongo.ObjectId(_id);
+        activity = {
+            ...baseActivity,
+            EventType: "ApprovedForProcessing",
+            attribute1: merchantId,
+            attribute2: null,
+            attribute3: merchant.name,
+            attribute4: transactionId,
+            attribute5: depositAmount,
+            attribute6: depositFiatCurrency,
+            attribute7: selected.cryptoId,
+            attribute8: "N/A",
+        }
+        try {
+            await activityTracking(activity, merchantId);
+            await updateMerchantTransactionStatus(newId,
+                { code: STATUS_PROCESSING_MERCHANT_WITHDRAWL, message: '' });
+            await updateMerchantTransactionStatusHistory(newId, withdrawalWalletAddress,
+                { code, message, updated : new Date() })
+            const merchants = await merchantsModel.findOne({ merchantId });
+            // const checkResult = await checkForMerchantBalance(merchantId, depositAmount);
+            // const { amtDiff, totalDepositAmount, totalWithdrawalAmount } = checkResult;
+            // if (amtDiff < 0) {
+            //     activity = {
+            //         ...baseActivity,
+            //         EventType: "RejectedDueToMerchantBalance",
+            //         attribute1: merchantId,
+            //         attribute2: null,
+            //         attribute3: merchant.name,
+            //         attribute4: transactionId,
+            //         attribute5: depositAmount,
+            //         attribute6: depositFiatCurrency,
+            //         attribute7: selected.cryptoId,
+            //         attribute8: "N/A",
+            //         attribute9: totalDepositAmount,
+            //         attribute10: totalWithdrawalAmount,
+
+            //     }
+            //     await activityTracking(activity, merchantId);
+            //     await updateMerchantTransactionStatus(newId, {
+            //         code: STATUS_MERCHANT_WITHDRAWL_BALANCE_REJECT,
+            //         message: `Total Deposit Amount: ${totalDepositAmount} and Total Withdrawal Amount ${totalWithdrawalAmount}.`,
+            //     });
+            //     await updateMerchantTransactionStatusHistory(newId, withdrawalWalletAddress,
+            //         { code, message })
+            //     return
+            // }
+
+            let tradeAPI = "aquanow";
+            // this is just to find USD exchange rate
+            console.log("depositAmount", depositAmount)
+            let amount = await GetCryptoExchangeRateFTX(cryptoId, depositAmount, depositFiatCurrency, false)
+            console.log("amount1", Number(amount[cryptoId]))
+            let currentExchangeRate = amount["price"];
+            let calMsg = `currentUSDExchangeRate=${currentExchangeRate}\n`
+            calMsg += `${depositFiatCurrency ? depositFiatCurrency : "USD"}AmountToBeConverted=${depositAmount}\n`
+            let amountWithOutSpread = amount[cryptoId]
+            if (merchants) {
+                if(merchants.paymentProvider){
+                    const paymentSettings = await getPaymentProviderSettings(merchants.paymentProvider._id ? merchants.paymentProvider._id.toString():merchants.paymentProvider.toString());
+                    merchants.withdrawalSpread = parseFloat((merchants?.withdrawalSpread ? merchants?.withdrawalSpread : 0) + (paymentSettings?.withdrawalSpread ? paymentSettings?.withdrawalSpread : 0));
+                }
+            }
+            let exchangeRateWithSpread = currentExchangeRate + (currentExchangeRate * (merchants.withdrawalSpread / 100))
+            if (["GBP", "EUR"].includes(depositFiatCurrency) && tradeAPI !== "aquanow") {
+                const eurToUsd = await axios.get(getTradeRateURL(depositFiatCurrency, "USD", tradeAPI))
+                const eurToUsdRate = parseFloat(getTradeRatePrice(depositFiatCurrency, "USD", eurToUsd, tradeAPI))
+                let interCal = eurToUsdRate * parseFloat(depositAmount)
+                calMsg += `${depositFiatCurrency ? depositFiatCurrency : "USD"} -> USD exchangeRate= ${eurToUsdRate}\n`
+                calMsg += `${depositFiatCurrency ? depositFiatCurrency : "USD"}AmountToBeConverted is then converted to USD = ${interCal}\n`
+            }
+            calMsg += `USDexchangeRateWithSpread=${exchangeRateWithSpread}\n`
+            //this is actual conversion with spread
+            amount = await GetCryptoExchangeRateFTX(cryptoId, depositAmount, depositFiatCurrency, false, exchangeRateWithSpread)
+            console.log("amount2", Number(amount[cryptoId]))
+            let withdrawalSpreadValue = amountWithOutSpread - amount[cryptoId]
+
+            const cryptoData = await cryptoModel.findOne({
+                cryptoId: cryptoId
+            });
+
+            let transNetwork = null;
+            if (data.selected.cryptoId === 'ETH') {
+                if (data.network === 'testnet' || data.network === 'goerli') transNetwork = 'testnet'
+                else transNetwork = 'mainnet';
+            } else transNetwork = data.network;
+            
+            let resultOfLedgerBalanceCheck = await checkForMerchantLedgerBalance(data, cryptoId, "merchant")
+            if (!resultOfLedgerBalanceCheck) {
+                return
+            }
+
+            const amountValue = (Number(amount[cryptoId]) + Number(minWalletCapacityThreshold));
+            let walletInfo = null;
+            let queryCryptoId = null;
+            let ETHFeeForErc20Transaction = 0, tronFeeForTrc20Transaction = 0;
+            let gasPriceConst = null
+            if (cryptoId === 'USDT') {
+                gasPriceConst = 100000
+            } else gasPriceConst = 21000
+            const ethGasPrice = await getFastGasPrice(process.env.ETH_GASCHECK_API_KEY)
+            let ethTxFee = (gasPriceConst * ethGasPrice.newValue) / 1000000000
+            if (['DAI', 'USDT', 'USDC'].includes(cryptoId)) {
+                ETHFeeForErc20Transaction = Number(ethTxFee) * 2
+                const cryptoMast = await cryptoModel.findOne({
+                    cryptoId: 'ETH'
+                });
+                queryCryptoId = cryptoMast._id;
+            } 
+            else if(cryptoId === "TRC20-USDT") {
+                tronFeeForTrc20Transaction = 40;
+                const cryptoMast = await getCryptotById({ cryptoId: 'TRX' })
+                queryCryptoId = cryptoMast._id;
+            }
+            else queryCryptoId = cryptoData._id;
+            console.log("finalAmount/amountValue ====>", amountValue);
+            // const walletInfoList = await merchantWalletsModel.aggregate([
+            //     {
+            //         $match: {
+            //             "cryptoId": new mongoose.mongo.ObjectId(queryCryptoId),
+            //             "network": transNetwork,
+            //             "status.code": { $in: ["Available"] },
+            //             paymentProvider: mongoose.Types.ObjectId(merchant.paymentProvider),
+            //         }
+            //     },
+            //     { $unwind: "$balance" },
+            //     { $group: { "_id": { "_id": "$_id", "cryptoId": "$balance.cryptoId" }, totalBal: { "$sum": "$balance.balanceAmount" } } },
+            //     { $match: { "totalBal": { "$gt": amountValue }, "_id.cryptoId": cryptoId } },
+            //     { $sort: { "totalBal": -1 } },
+            //     { $limit: 1 }
+            // ]);
+
+            const walletInfoList = await getWalletInfoList(
+                queryCryptoId,
+                transNetwork,
+                amountValue,
+                cryptoId,
+                merchant,
+                ETHFeeForErc20Transaction,
+                tronFeeForTrc20Transaction
+            );
+            if (walletInfoList && walletInfoList.length > 0) {
+                walletInfo = await walletModel.findOne({
+                    "_id": new mongoose.mongo.ObjectId(walletInfoList[0]._id._id)
+                });
+            }
+
+            if (walletInfo && Object.keys(walletInfo).length > 0) {
+                let merchantBalance = await merchantBalancesModel.findOne({ merchantId: merchant._id, cryptoId: cryptoId });
+                let merchantBalanceAmount = 0;
+                if (merchantBalance) {
+                    await walletModel.updateOne({ "_id": new mongoose.mongo.ObjectId(walletInfo._id) },
+                    { $set: { "status.code": "In Use", "status.message": "tranferTrasactionID=" + data.transactionId, "status.updated": new Date() } })
+
+                    await walletModel.updateOne(
+                        { "_id": new mongoose.mongo.ObjectId(walletInfo._id) },
+                        {
+                            "$push": {
+                                "status.history": { code: walletInfo.status.code, message: walletInfo.status.message, updated: walletInfo.status.updated }
+                            }
+                        }
+                    )
+                    walletInfo = await walletModel.findOne({ "_id": new mongoose.mongo.ObjectId(walletInfo._id) })
+
+                    await merchantTransactionModal.updateOne(
+                        { _id: newId, "withdrawalWalletAddress": withdrawalWalletAddress },
+                        {
+                            $set: {
+                                "fromWallet": walletInfo.address.key,
+                            }
+                        }
+                    );
+
+                    data = await merchantTransactionModal.findOne({ "transactionId": data.transactionId });
+                    
+                    merchantBalanceAmount = merchantBalance?.balance?.balanceAmount ? merchantBalance.balance.balanceAmount : 0;
+                } else {
+                    await updateMerchantTransactionStatus(newId,
+                        {
+                            code: STATUS_UNABLE_TO_SOURCE_MERCHANT_WITHDRAWL_WALLET,
+                            message: '',
+                            updated : new Date()
+                        }
+                    );
+                    await updateMerchantTransactionStatusHistory(newId, data.withdrawalWalletAddress,
+                        {
+                            code: STATUS_PROCESSING_MERCHANT_WITHDRAWL,
+                            message: '',
+                            updated : new Date()
+                        }
+                    );
+                    return;
+                }
+
+                let date = new Date();
+                
+                await updateMerchantTransactionStatus(newId,
+                    {
+                        code: STATUS_SOURCE_MERCHANT_WITHDRAWL_WALLET,
+                        message: `${walletInfo._id} ${walletInfo.address.key}`, updated: date
+                    }
+                );
+                await updateMerchantTransactionStatusHistory(newId, withdrawalWalletAddress,
+                    {
+                        code: STATUS_SOURCE_MERCHANT_WITHDRAWL_WALLET,
+                        message: `${walletInfo._id} ${walletInfo.address.key}`, updated: date
+                    }
+                );
+                await updateMerchantTransactionStatusHistory(newId, data.withdrawalWalletAddress,
+                    { code: STATUS_PROCESSING_MERCHANT_WITHDRAWL, message: '',updated: new Date() }
+                );
+
+                let createReceiptWait = null;
+                let txDtls = null;
+                let b2cToWallet = await b2cUserWalletModel.findOne({ "address.key": withdrawalWalletAddress, network: transNetwork });
+                let merchantWallet = await merchantWalletsModel.findOne({ "address.key": withdrawalWalletAddress, network: transNetwork });
+                let walletTransactionResponse = null;
+
+                if (b2cToWallet) {
+                    createReceiptWait = { status: 1 };
+                } else if (merchantWallet) {
+                    createReceiptWait = { status: 1 };
+                } else {
+                    walletTransactionResponse = await walletTransactions(phrase, walletInfo, amount, data, withdrawalWalletAddress, merchants.withdrawalSpread, Number(amount[cryptoId]), newId, "merchant", merchantBalanceAmount, withdrawalSpreadValue);
+                    if (cryptoId === "LTC") {
+                        createReceiptWait = { status: 1 };
+                    } else {
+                        createReceiptWait = walletTransactionResponse.createReceiptWait ? walletTransactionResponse.createReceiptWait : "";
+                        txDtls = walletTransactionResponse.txDtls;
+                    }
+                };
+
+                if (createReceiptWait.status && createReceiptWait.status === 1) {
+                    await updateMerchantTransactionStatus(newId,
+                        {
+                            code: STATUS_SEND_TO_RECIPIENT_WALLET,
+                            message: JSON.stringify({ newGasFee: walletTransactionResponse?.ethTxFee  || "N/A", oldGasFee: walletTransactionResponse?.oldEthTxFee  || "N/A" })
+                        }
+                    );
+
+                    await updateMerchantTransactionStatusHistory(newId, withdrawalWalletAddress,
+                        {
+                            code: STATUS_SEND_TO_RECIPIENT_WALLET,
+                            message: JSON.stringify({ newGasFee: walletTransactionResponse?.ethTxFee || "N/A", oldGasFee: walletTransactionResponse?.oldEthTxFee  || "N/A" }),
+                            updated : new Date()
+                        }
+                    );
+
+                    await updateMerchantTransactionStatus(newId,
+                        {
+                            "code": STATUS_MERCHANT_WITHDRAWL_CONFIRMED,
+                            "message": JSON.stringify(createReceiptWait),
+                            "updated":new Date()
+                        }
+                    );
+
+                    await updateMerchantTransactionStatusHistory(newId, data.withdrawalWalletAddress,
+                        {
+                            "code": STATUS_MERCHANT_WITHDRAWL_CONFIRMED,
+                            "message": JSON.stringify(createReceiptWait),
+                            "updated":new Date()
+                        }
+                    );
+                    date = new Date();
+                    if (b2cToWallet) {
+                        const addressData = ethWallet["default"].generate();
+                        const uid2 = addressData.getPrivateKeyString();
+                        const cryptoAmount = Number(amount[cryptoId]);
+                        await transactionModel.updateOne(
+                            { _id: newId, "withdrawalWalletAddress": withdrawalWalletAddress },
+                            {
+                                $set: {
+                                    "selected.actualAmountSent": cryptoAmount,
+                                    "transactionRefLink": uid2,
+                                    "lastupdatedDate": new Date()
+                                }
+                            }
+                        );
+                        let b2cTransactionObj = new b2cUserTransactionsModel({
+                            transactionId: uid2,
+                            transactionRefLink: data.transactionId,
+                            b2cUser: b2cToWallet.userId,
+                            type: "receive",
+                            ethereumNetwork: data.ethereumNetwork,
+                            amount: cryptoAmount,
+                            cryptoId: cryptoId,
+                            'status.code': "B2CWalletMonitor:ReceiveCompleted",
+                            'status.message': "",
+                            'status.updated': new Date(),
+                            'status.history': [
+                                {
+                                    'code': "B2CReceiveFlow:WithdrawalToCryptonPayWallet",
+                                    'message': "",
+                                    'updated': new Date(),
+                                }
+                            ],
+                            toWallet: withdrawalWalletAddress,
+                            fromWallet: walletInfo.address.key,
+                            network: data.network,
+                            USDAmount: data.depositAmount,
+                            createdDate: new Date(),
+                            lastupdatedDate: new Date(),
+                            actualAmount: {
+                                crypto: cryptoAmount,
+                                usd: data.depositAmount
+                            },
+                        });
+                        await b2cTransactionObj.save();
+                        let latestOverallBalance = await getLatestOverallBalance(b2cToWallet.userId, data.depositAmount, cryptoId);
+                        const newUsdAmount = latestOverallBalance.usdAmount + data.depositAmount;
+                        const newBtcAmount = await GetCryptoOrAmountExchangeRate("USD", "BTC", newUsdAmount);
+                        b2cTransactionObj.overallBalance = {
+                            usdAmount: newUsdAmount,
+                            btcAmount: newBtcAmount,
+                        }
+                        await b2cTransactionObj.save();
+                        addBalanceToB2CWallet(b2cToWallet, cryptoAmount, cryptoData);
+                        await walletModel.updateOne(
+                            { "_id": walletInfo._id },
+                            { $set: { balanceAmount: walletInfo.balanceAmount - cryptoAmount } } // TODO check this balance updating correctly or not. also check in walletTransaction for B2c.
+                        );
+                    } else if (merchantWallet) {
+                        console.log("withdrawal Wallet Address =====> Merchant Wallet Found. Not handled");
+                    } else {
+                        if (cryptoId !== "LTC") {
+                            await merchantTransactionModal.updateOne(
+                                { _id: newId, "withdrawalWalletAddress": withdrawalWalletAddress },
+                                {
+                                    $set: {
+                                        "transactionHash": txDtls.transactionHash,
+                                        "selected.actualAmountSent": txDtls.amount_transferred,
+                                        "gasFee": txDtls.actual_gas_price,
+                                    }
+                                }
+                            );
+                        }
+                    };
+                    const gasFeeDeducted = cryptoId === "TRC20-USDT" ? parseFloat(txDtls.amount_transferred) : parseFloat(txDtls.amount_transferred) + parseFloat(txDtls.actual_gas_price)
+                    await updateMerchantTransactionStatus(newId,
+                        {
+                            code: "WalletManagementService::UpdateMerchantWalletBalances",
+                            message: `Merchant ${cryptoId} wallet balance updated from ${(merchantBalance.balance.balanceAmount ? parseFloat(merchantBalance.balance.balanceAmount) : 0) + gasFeeDeducted} to ${(merchantBalance.balance.balanceAmount ? parseFloat(merchantBalance.balance.balanceAmount) : 0)}`
+                        }
+                    );
+                    
+                    await updateMerchantTransactionStatusHistory(newId, null,
+                        {
+                            code: "WalletManagementService::UpdateMerchantWalletBalances",
+                            message: `Merchant ${cryptoId} wallet balance updated from ${(merchantBalance.balance.balanceAmount ? parseFloat(merchantBalance.balance.balanceAmount) : 0) + gasFeeDeducted} to ${(merchantBalance.balance.balanceAmount ? parseFloat(merchantBalance.balance.balanceAmount) : 0)}`,
+                            updated: new Date()
+                        }
+                    );
+
+                    const date1 = new Date();
+                    await merchantTransactionModal.updateOne(
+                        { "_id": newId, "withdrawalWalletAddress": withdrawalWalletAddress },
+                        {
+                            $set: {
+                                "status.code": STATUS_SETTLEMENT_TRADE_EXECUTING,
+                                "status.updated": date1,
+                                "status.message": "",
+                            }
+                        }
+                    );
+
+                    await updateMerchantTransactionStatusHistory(newId, withdrawalWalletAddress,
+                        {
+                            "code": STATUS_SETTLEMENT_TRADE_EXECUTING,
+                            "message": "", updated: date1
+                        }
+                    );
+                    data = await merchantTransactionModal.findOne({ "transactionId": data.transactionId });
+                    if (cryptoId !== "LTC") {
+                        if(cryptoId === "TRC20-USDT" && walletTransactionResponse?.createReceiptWait?.result === "FAILED"){
+                            await updateMerchantWalletBalanceForTRC20(data, walletInfo._id, 0, "TRC20-USDT");
+                        }
+                        else{
+                            await updateMerchantWalletBalance(data, walletInfo._id, "trc20");
+                        }
+                    }
+                    if (cryptoId === "TRC20-USDT") {
+                        if(walletTransactionResponse?.createReceiptWait?.result === "FAILED"){
+                            await updateMerchantWalletBalanceForTRC20(data, walletInfo._id, 0, "TRX")
+                        }
+                        else {
+                            await updateMerchantWalletBalanceForTRC20(data, walletInfo._id, walletTransactionResponse?.actualGasPrice, "TRX")
+                        }
+                    }
+                    if (process.env.WALLET_NETWORK !== "testnet") {
+                        await merchantTransactionModal.updateOne(
+                            { "_id": newId, "withdrawalWalletAddress": withdrawalWalletAddress },
+                            {
+                                $set: {
+                                    "status.code": STATUS_SETTLEMENT_TRADE_EXECUTING,
+                                    "status.updated": date1,
+                                    "status.message": "",
+                                }
+                            }
+                        );
+                        await updateMerchantTransactionStatusHistory(newId, withdrawalWalletAddress,
+                            {
+                                "code": STATUS_SETTLEMENT_TRADE_EXECUTING,
+                                "message": "", updated: date1
+                            }
+                        );
+                        data = await merchantTransactionModal.findOne({ "transactionId": data.transactionId });
+                        await executeFTXBuyTrade(data,  null, "merchant")
+                    } else {
+                        await updateMerchantTransactionStatus(newId,
+                            { "code": "WalletManagementService::NoAutoTradeRequiredForTestnet", "message": `` }
+                        );
+    
+                        await updateMerchantTransactionStatusHistory(newId, data.withdrawalWalletAddress, { "code": "WalletManagementService::NoAutoTradeRequiredForTestnet", "message": "", updated: new Date() })
+                    }
+                    data = await merchantTransactionModal.findOne({ "transactionId": data.transactionId });
+                    const {
+                        transactionId,
+                        merchantId,
+                        depositAmount,
+                        merchant,
+                    } = data;
+                    const merchantPayload = {
+                        transactionId: transactionId,
+                        merchantUserId: null,
+                        date: new Date(),
+                        amount: (depositAmount * 100),
+                        // fee: (data.transactionFee * 100), not applicable for merchant wallet withdrawals
+                        type: "MERCHANT_WITHDRAWAL",
+                        status: {
+                            code: "SUCCESS",
+                            message: "Successful Withdrawal",
+                        },
+                    };
+                    activity = {
+                        ...baseActivity,
+                        EventType: "WithdrawalCompleted",
+                        attribute1: merchantId,
+                        attribute2: null,
+                        attribute3: merchant.name,
+                        attribute4: transactionId,
+                        attribute5: depositAmount,
+                        attribute6: depositFiatCurrency,
+                        attribute7: selected.cryptoId,
+                        attribute8: "N/A",
+                    }
+                    await activityTracking(activity, merchantId);
+
+                    const subject = `Withdrawal completed`;
+                    const condition = { _id: merchant._id}
+                    const merchantEmail = await getMerchantEmailAddress(condition)
+                    const emailBody = `Withdrawal completed for transactionId: ${transactionId}`;
+                    await sendEmail(merchantEmail, ADMIN_EMAIL, subject, emailBody);
+
+                    await updateMerchantTransactionStatus(newId,
+                        {
+                            code: STATUS_NOTIFY_MERCHANT,
+                            message: JSON.stringify(merchantPayload)
+                        }
+                    );
+
+                    await updateMerchantTransactionStatusHistory(newId, data.withdrawalWalletAddress,
+                        {
+                            code: STATUS_NOTIFY_MERCHANT,
+                            message: JSON.stringify(merchantPayload),
+                            updated: new Date()
+                        }
+                    );
+
+                    activity = {
+                        ...baseActivity,
+                        EventType: "UpdateMerchantWalletBalance",
+                        attribute1: merchantId,
+                        attribute2: null,
+                        attribute3: merchant.name,
+                        attribute4: transactionId,
+                        attribute5: depositAmount,
+                        attribute6: depositFiatCurrency,
+                        attribute7: selected.cryptoId,
+                        attribute8: "N/A",
+                    }
+                    await activityTracking(activity, merchantId);
+                    if (merchants.callbackUrls && merchants.callbackUrls.confirmation) {
+                        try {
+                            await call(
+                                {
+                                    method: "POST",
+                                    url: merchants.callbackUrls.confirmation,
+                                },
+                                merchantPayload
+                            ).catch(async (err) => {
+                                await updateMerchantTransactionStatus(newId,
+                                    {
+                                        code: STATUS_NOTIFY_MERCHANT_FAILED,
+                                        message: 'Notify merchant API call failed. URL is invalid.'
+                                    }
+                                );
+                                await updateMerchantTransactionStatusHistory(newId, data.withdrawalWalletAddress,
+                                    {
+                                        code: STATUS_NOTIFY_MERCHANT_FAILED,
+                                        message: 'Notify merchant API call failed. URL is invalid.',
+                                        updated: new Date()
+                                    }
+                                );
+                            })
+                        } catch (err) {
+                            console.log("Error: while notify merchant API call")
+                        }
+                    } else {
+                        await updateMerchantTransactionStatus(newId,
+                            {
+                                code: STATUS_NOTIFY_MERCHANT_FAILED,
+                                message: 'Notify merchant URL is missing.'
+                            }
+                        );
+                        await updateMerchantTransactionStatusHistory(newId, data.withdrawalWalletAddress,
+                            {
+                                code: STATUS_NOTIFY_MERCHANT_FAILED,
+                                message: 'Notify merchant URL is missing.',
+                                updated: new Date()
+                            }
+                        );
+                        activity = {
+                            ...baseActivity,
+                            EventType: "MerchantWebhookError",
+                            attribute1: data.merchantId,
+                            attribute2: null,
+                            attribute3: data.merchant.name,
+                            attribute4: data.transactionId,
+                            attribute5: data.depositAmount,
+                            attribute6: data.depositFiatCurrency,
+                            attribute7: data.selected.cryptoId,
+                            attribute8: "N/A",
+                            attribute9: 'Notify merchant URL is missing.',
+                        }
+                        await activityTracking(activity, merchantId);
+                    }
+                    if (cryptoId !== "LTC") {
+                        await walletModel.updateOne({ "_id": new mongoose.mongo.ObjectId(walletInfo._id) },
+                        { $set: { "status.code": "Available", "status.message": "" } });
+                        if (walletTransactionResponse?.createReceiptWait?.result === "FAILED") {
+                            await updateMerchantTransactionStatus(newId,  { code: STATUS_WITHDRAWL_ERROR, message: `WithdrawalFailed due to ${walletTransactionResponse?.createReceiptWait?.receipt?.result} but it got consumed gas fee ${walletTransactionResponse?.actualGasPrice}` })
+                        }
+                        else {
+                            await updateMerchantTransactionStatus(newId,
+                                {
+                                    code: STATUS_MERCHANT_WITHDRAWL_COMPLETED,
+                                    message: ''
+                                }
+                            );
+                        }
+                    }
+                };
+            } else {
+                activity = {
+                    ...baseActivity,
+                    EventType: "UnableToSourceWithdrawalWallet",
+                    attribute1: merchantId,
+                    attribute2: null,
+                    attribute3: merchant.name,
+                    attribute4: transactionId,
+                    attribute5: depositAmount,
+                    attribute6: depositFiatCurrency,
+                    attribute7: selected.cryptoId,
+                    attribute8: "N/A",
+                }
+                await activityTracking(activity, merchantId);
+                await updateMerchantTransactionStatus(newId,
+                    {
+                        code: STATUS_UNABLE_TO_SOURCE_MERCHANT_WITHDRAWL_WALLET,
+                        message: "Wallet Not Avaible for Amount :" + Number(amount[cryptoId]) + Number(minWalletCapacityThreshold)
+                    }
+                );
+                await updateMerchantTransactionStatusHistory(newId, data.withdrawalWalletAddress,
+                    {
+                        code: STATUS_PROCESSING_MERCHANT_WITHDRAWL,
+                        message: '',
+                        updated: new Date()
+                    }
+                );
+            };
+        } catch (error) {
+            activity = {
+                ...baseActivity,
+                EventType: "ErrorEncountered",
+                attribute1: merchantId,
+                attribute2: null,
+                attribute3: merchant.name,
+                attribute4: transactionId,
+                attribute5: depositAmount,
+                attribute6: depositFiatCurrency,
+                attribute7: selected.cryptoId,
+                attribute8: depositAmount//crypto amount
+            }
+            await activityTracking(activity, merchantId);
+            console.log('Manage Wallets Error Block...', error.message)
+            saveErrorLog({
+                merchantId: null,
+                transactionId: null,
+                component: "WalletManagementService",
+                severity: null,
+                errorCode: error.code ? error.code.toString() : "406",
+                errorMessage: error.message ? "Error in manageWallets of wallet-service" + error.message : "Error in manageWallets of wallet-service",
+                postMvpComment: null,
+            });
+
+            const txData = await merchantTransactionModal.findOne({ _id: newId, "withdrawalWalletAddress": data.withdrawalWalletAddress })
+            await merchantTransactionModal.updateOne(
+                { _id: newId, "withdrawalWalletAddress": data.withdrawalWalletAddress },
+                { $set: { "status.code": STATUS_MERCHANT_WITHDRAWL_ERROR, "status.message": error.message } }
+            );
+            await merchantTransactionModal.updateOne(
+                { _id: newId, "withdrawalWalletAddress": data.withdrawalWalletAddress },
+                {
+                    "$push": {
+                        "status.history": {
+                            code: txData.status.code, message: txData.status.message
+                        }
+                    }
+                }
+            );
+            throw new Error(error)
+        }
+
+    }
+};
+
+
+export const updateMerchantTransactionStatus = async (id, status) => {
+    try {
+        return await merchantTransactionModal.updateOne(
+            { _id: id },
+            { $set: { "status.code": status.code, "status.message": status.message, "status.updated": new Date(), lastupdatedDate: new Date() } }
+        )
+    } catch (error) {
+        saveErrorLog({
+            merchantId: null,
+            transactionId: null,
+            component: "WalletManagementService",
+            severity: null,
+            errorCode: error.code ? error.code.toString() : "406",
+            errorMessage: error.message ? "Error in updateMerchantTransactionStatus of wallet-service" + error.message : "Error in updateMerchantTransactionStatus of wallet-service",
+            postMvpComment: null,
+        })
+        throw new Error(error)
+    }
+};
+
+export const updateMerchantTransactionStatusHistory = async (id, withdrawalWalletAddress, history) => {
+    try {
+        let query = withdrawalWalletAddress ? { _id: id, "withdrawalWalletAddress": withdrawalWalletAddress } : { _id: id }
+        return await merchantTransactionModal.updateOne(
+            query,
+            {
+                "$push": {
+                    "status.history": history
+                }
+            }
+        )
+    } catch (error) {
+        saveErrorLog({
+            merchantId: null,
+            transactionId: null,
+            component: "WalletManagementService",
+            severity: null,
+            errorCode: error.code ? error.code.toString() : "406",
+            errorMessage: error.message ? "Error in updateMerchantTransactionStatusHistory of wallet-service" + error.message : "Error in updateMerchantTransactionStatusHistory of wallet-service",
+            postMvpComment: null,
+        })
+        throw error;
+    }
+};
+
+// temp remove balance check condition
+
+// const checkForMerchantBalance = async (merchantId, withdrawAmt) => {
+//     try {
+//         const totalAmounts = await merchantTransactionModal.aggregate([
+//             {
+//                 $match: {
+//                     "type": { "$in": ["Withdrawal", "Deposit"] }, "merchantId": merchantId,
+//                     "status.code": { "$in": ["WalletManagementService:MerchantWithdrawalCompleted", "MerchantWalletMonitor:ReceiveCompleted"] }
+//                 }
+//             },
+//             {
+//                 $group: {
+//                     _id: '$type',
+//                     depositAmount: { $sum: '$depositAmount' },
+//                     USDAmount: { $sum: '$USDAmount' },
+
+//                 }
+//             }, {
+//                 $project: {
+//                     _id: 1,
+//                     amount: '$depositAmount',
+//                     usdAmount: '$USDAmount'
+//                 }
+//             }
+//         ]);
+//         let totalDepositAmount = totalAmounts.filter(amt => amt._id === 'Deposit');
+//         totalDepositAmount = totalDepositAmount.length > 0 ? (totalDepositAmount[0].amount + totalDepositAmount[0].usdAmount) : 0;
+//         let totalWithdrawalAmount = totalAmounts.filter(amt => amt._id === 'Withdrawal');
+//         totalWithdrawalAmount = totalWithdrawalAmount.length > 0 ? (totalWithdrawalAmount[0].amount + totalWithdrawalAmount[0].usdAmount) : 0;
+//         const amtDiff = totalDepositAmount - (totalWithdrawalAmount + withdrawAmt);
+//         return { amtDiff, totalDepositAmount, totalWithdrawalAmount }
+//     } catch (err) {
+//         throw err
+//     }
+// };
+

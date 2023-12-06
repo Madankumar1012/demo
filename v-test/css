@@ -1,0 +1,10 @@
+const location = useLocation();
+  let isTab3Highlighted: Boolean;
+  useEffect(() => {
+    isTab3Highlighted = [
+      "/general-enquiry",
+      "/wedding-enquiry",
+      "/reserve-table",
+    ]?.includes(location && location?.pathname);
+  }),
+    [location?.pathname];

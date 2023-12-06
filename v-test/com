@@ -1,0 +1,699 @@
+import axios from 'axios';
+import crypto from 'crypto';
+import ethWallet from "ethereumjs-wallet";
+import jwt from "jsonwebtoken";
+import mongoose from 'mongoose';
+import { saveErrorLogDao } from "../DAOServices/errorLogDao.js";
+import { cryptoModel } from "../db/models/crypto.js";
+import { merchantBalancesModel } from "../db/models/merchantBalances.js";
+import { merchantTransactionModal } from '../db/models/merchantTransactions.js';
+import { merchantWalletsModel } from "../db/models/merchantWallets.js";
+import { merchantsModel } from "../db/models/merchants.js";
+import { transactionModel } from "../db/models/transactions.js";
+import { walletModel } from "../db/models/wallet.js";
+import { getCurrName } from "../services/commonService.js";
+import { saveErrorLog } from "../services/errorLogService.js";
+import { updateMerchantTransactionStatus, updateMerchantTransactionStatusHistory } from "../wallets/merchantWalletTransaction.js";
+import { getMerchantByMerchantId } from '../DAOServices/merchantDAO.js';
+import { getMerchantWalletByUserIDandCryptoId, updateMerchantBalanceDAO } from '../DAOServices/merchantBalanceDAO.js';
+import { updateTransaction } from '../services/transaction-service.js';
+import { getMerchantAutomation } from '../DAOServices/merchantAutomationDAO.js';
+import { getCryptotById } from '../DAOServices/cryptoDAO.js';
+import constant from '../common/constants.js';
+import { updateSingleTransaction } from '../DAOServices/transactionDAO.js';
+import { STATUS_SELECTED_LIQUIDITY_PROVIDER } from '../status.js';
+
+
+const getActTrackingToken = async (email) => {
+    try {
+        let token = await jwt.sign({ userId: email ? email.toString() : email }, process.env.ACTIVITY_TRACKING_SECRET_KEY, { expiresIn: '30d' });
+        return token;
+    } catch (err) {
+        console.log(err)
+        throw new Error("Error while getActTrackingToken", err);
+    }
+};
+
+const activityTracking = async (activityObj, id) => {
+    try {
+        let activityToken = await getActTrackingToken(id);
+        var Options = {
+            method: "POST",
+            url: process.env["ACTIVITY_TRACKING_API"] + "/activitytrk/activitytracking",
+            headers: {
+
+            },
+            data: {
+                activity_tracking_token: activityToken,
+                activityTrack: [activityObj]
+            }
+        };
+        axios.request(Options)
+            .then(response => {
+            })
+            .catch(error => {
+                throw new Error("Error while activity Tracking", error);
+            });
+    } catch (err) {
+        console.log(err)
+        throw new Error("Error while activity Tracking", err);
+    }
+};
+
+// getTradeRateURL(XXXXX, YYYYYY, tradeAPI)
+const getTradeRateURL = (baseCurrency, toCurrency, tradeAPI = 'aquanow') => {
+    if(baseCurrency === "TRC20-USDT") {
+        baseCurrency = "USDT"
+    }
+    switch (tradeAPI) {
+        case 'kraken':
+            return `${process.env.TRADE_SETTLEMENT_API_URL}/0/public/Ticker?pair=${getCurrName(baseCurrency, toCurrency)}${toCurrency}`
+        default: //aquanow
+            if (["DAI", "TRC20-USDT"]?.includes(baseCurrency)) {
+                baseCurrency = "USDT"
+            }
+            if (["DAI", "TRC20-USDT"]?.includes(toCurrency)) {
+                toCurrency = "USDT"
+            }
+            return `${process.env.TRADE_SETTLEMENT_API_URL_AQUANOW_MARKET}/bestprice?symbol=${baseCurrency}-${toCurrency}`
+    }
+}
+
+const getLiquidtyProvider = (tradeAPI = 'aquanow') => {
+    switch (tradeAPI) {
+        case 'kraken':
+            return `${process.env.TRADE_SETTLEMENT_API_URL}`
+        default: //aquanow
+            return `${process.env.TRADE_SETTLEMENT_API_URL_AQUANOW_MARKET}`
+    }
+}
+
+// getTradeRatePrice(XXXXXXX, YYYYYY, ZZZZZZZ, tradeAPI)
+const getTradeRatePrice = (baseCurrency, toCurrency, response, tradeAPI = 'aquanow') => {
+    if(baseCurrency === "TRC20-USDT") {
+        baseCurrency = "USDT"
+    }
+    switch (tradeAPI) {
+        case 'kraken':
+            return parseFloat(response.data.result[`${getCurrName(baseCurrency, toCurrency)}${toCurrency}`].a[0])
+        default: //aquanow
+            return parseFloat(response.data.bestAsk)
+    }
+}
+
+const getAquanowSignature = (httpMethod, apiPath, nonce) => {
+    const signatureContent = JSON.stringify({
+        httpMethod,
+        path: apiPath,
+        nonce
+      });
+      const sig = crypto
+        .createHmac("sha384", process.env.TRADE_SETTLEMENT_API_SECRET_AQUANOW)
+        .update(signatureContent)
+        .digest("hex");
+      return sig
+}
+
+const GetCryptoExchangeRateFTX = async (crypto, currencyAmount, depositFiatCurrency, isMultiplication, lockedExchangeRate) => {
+    let tradeAPI = "aquanow"
+    try {
+        let prices = {};
+        const csymbol = crypto;
+        crypto = ["USDC", "DAI","TRC20-USDT"]?.includes(crypto) ? 'USDT' : crypto;
+        if (["USDC", "DAI","TRC20-USDT"]?.includes(depositFiatCurrency)) {
+            depositFiatCurrency = "USDT"
+        }
+        if (crypto === depositFiatCurrency) {
+            console.log("same crypto currcy conversion returned 1")
+            return { [csymbol]: currencyAmount, price: 1 }
+        }
+        if (['EUR', 'GBP'].includes(depositFiatCurrency) && tradeAPI !== "aquanow") {
+            const eurToUsd = await axios.get(getTradeRateURL(depositFiatCurrency, "USD", tradeAPI))
+            const eurToUsdRate = parseFloat(getTradeRatePrice(depositFiatCurrency, "USD", eurToUsd, tradeAPI))
+            let interCal = eurToUsdRate * currencyAmount
+            const cryptoToUsd = await axios.get(getTradeRateURL(crypto, "USD", tradeAPI))
+            const cryptoToUSDRate = parseFloat(getTradeRatePrice(crypto, "USD", cryptoToUsd, tradeAPI))
+            let price = interCal / (lockedExchangeRate ? lockedExchangeRate : cryptoToUSDRate);
+            if (isMultiplication) {
+                price = interCal * (lockedExchangeRate ? lockedExchangeRate : cryptoToUSDRate);
+                price = price / eurToUsdRate
+            }
+            let roundedPrice = (Math.round(price * 100000000) / 100000000).toFixed(8);
+            prices = {
+                [csymbol]: parseFloat(roundedPrice),
+                price: (lockedExchangeRate ? lockedExchangeRate : cryptoToUSDRate)
+            };
+            return prices
+        } else {
+            let response = await axios.get(getTradeRateURL(crypto, depositFiatCurrency.trim(), tradeAPI));
+            const rate = parseFloat(getTradeRatePrice(crypto, depositFiatCurrency.trim(), response, tradeAPI));
+            let price = currencyAmount / (lockedExchangeRate ? lockedExchangeRate : rate);
+            if (isMultiplication) {
+                price = currencyAmount * (lockedExchangeRate ? lockedExchangeRate : rate);
+            }
+            let roundedPrice = (Math.round(price * 100000000) / 100000000).toFixed(8);
+            prices = {
+                [csymbol]: parseFloat(roundedPrice),
+                price: (lockedExchangeRate ? lockedExchangeRate : rate)
+            };
+            return prices
+        }
+    } catch (error) {
+        console.log(error)
+        saveErrorLog({
+            merchantId: null,
+            transactionId: null,
+            component: "WalletManagementService",
+            severity: null,
+            errorCode: error.code ? error.code.toString() : "406",
+            errorMessage: error.message ? "Error in GetCryptoExchangeRateFTX of wallet-service" + error.message : "Error in GetCryptoExchangeRateFTX of wallet-service",
+            postMvpComment: null,
+        })
+        throw new Error(error)
+    }
+}
+
+
+
+export const updateTransactionStatus = async (id, status) => {
+    try {
+        return await transactionModel.updateOne(
+            { _id: id },
+            { $set: { "status.code": status.code, "status.message": status.message, "status.updated": new Date(), "lastupdatedDate": new Date() } }
+        )
+    } catch (error) {
+        saveErrorLogDao({
+            merchantId: null,
+            transactionId: id,
+            component: "WalletManagementService",
+            severity: null,
+            errorCode: error.code ? error.code.toString() : "406",
+            errorMessage: error.message ? "Error in updateTransactionStatus of common-service " + error.message : "Error in updateTransactionStatus of common-service",
+            postMvpComment: null,
+        })
+        throw new Error(error)
+    }
+}
+
+export const updateStatusHistory = async (id, withdrawalWalletAddress, history) => {
+    try {
+        return await transactionModel.updateOne(
+            { _id: id, "withdrawalWalletAddress": withdrawalWalletAddress},
+            {
+                "$push": {
+                    "status.history": history
+                },
+                "lastupdatedDate": new Date()
+            }
+        )
+    } catch (error) {
+        saveErrorLog({
+            merchantId: null,
+            transactionId: id,
+            component: "WalletManagementService",
+            severity: null,
+            errorCode: error.code ? error.code.toString() : "406",
+            errorMessage: error.message ? "Error in updateStatusHistory of wallet-service" + error.message : "Error in updateStatusHistory of wallet-service",
+            postMvpComment: null,
+        })
+        throw error;
+    }
+}
+
+const checkForMerchantLedgerBalance = async (transaction, ftxTradeFromCurrecy, component) => {
+    let usdToCryptoFTXAmount = await GetCryptoExchangeRateFTX(transaction.selected.cryptoId, parseFloat(transaction.depositAmount + (transaction.transactionFee && component !== "merchant" ? transaction.transactionFee : 0)), transaction.depositFiatCurrency, false)
+    let ftxTradeReceiveAmount = { [transaction.selected.cryptoId]: parseFloat(usdToCryptoFTXAmount[transaction.selected.cryptoId]) }
+    if (ftxTradeFromCurrecy !== transaction.selected.cryptoId) {
+        ftxTradeReceiveAmount = await GetCryptoExchangeRateFTX(transaction.selected.cryptoId, parseFloat(usdToCryptoFTXAmount[transaction.selected.cryptoId]), ftxTradeFromCurrecy, true)
+    }
+    const merchant = await merchantsModel.findOne({ merchantId: transaction.merchantId })
+    if (!merchant) {
+        throw new Error("Merchant not found for merchantId:" + transaction.merchantId)
+    }
+    let merchantBalance = await merchantBalancesModel.findOne({ merchantId: merchant._id, cryptoId: ftxTradeFromCurrecy })
+    if (merchantBalance && merchantBalance.balance && ((merchantBalance.balance.balanceAmount ? parseFloat(merchantBalance.balance.balanceAmount) : 0) - parseFloat(ftxTradeReceiveAmount[transaction.selected.cryptoId])) >= 0) {
+        return true
+    } else {
+        let errStatus = "WalletManagementService:WithdrawalRejectedDueToInsufficientFunds"
+        let errmsg = `${ftxTradeFromCurrecy} ledger balance(${merchantBalance && merchantBalance.balance && merchantBalance.balance.balanceAmount ? parseFloat(merchantBalance.balance.balanceAmount) : 0}) is less than withdrawal amount(${parseFloat(ftxTradeReceiveAmount[transaction.selected.cryptoId])})`
+        if (component === "merchant") {
+            await updateMerchantTransactionStatus(transaction._id, {
+                "code": errStatus, "message": errmsg
+            })
+            await updateStatusHistory(transaction._id, transaction.withdrawalWalletAddress, {
+                "code": errStatus, "message": errmsg, updated: new Date()
+            })
+        } else {
+            await updateTransactionStatus(transaction._id, {
+                "code": errStatus, "message": errmsg
+            })
+            await updateStatusHistory(transaction._id, transaction.withdrawalWalletAddress, {
+                "code": errStatus, "message": errmsg, updated: new Date()
+            })
+        }
+        console.log(`Insufficient funds in merchant ledger balance for ${ftxTradeFromCurrecy} (transctionId=${transaction.transactionId})`)
+        return false
+    }
+}
+
+const updateMerchantBalanceForTRC20 = async (transaction, ftxTradeFromCurrecy, component, sendFeeTransaction, resourcesConsumedFee) => {
+    const tradeAPI = "aquanow";
+    const transactionDepositAmount = 0;
+    const transactionTransactionFee = resourcesConsumedFee;
+    const transactionSelectedCryptoId = "TRX";
+    const sendTransactionFee = 0
+    try {
+        let updateMerchantBalanceMsg = { 'transaction.withdrawalAmount': transactionDepositAmount};
+        if (component !== "merchant") {
+            updateMerchantBalanceMsg['transaction.gasFee'] = transactionTransactionFee ? transactionTransactionFee : 0;
+        }
+        updateMerchantBalanceMsg[`${transaction.depositFiatCurrency}AmountToBeConverted`] = parseFloat(transactionDepositAmount + (transactionTransactionFee && component !== "merchant" ? transactionTransactionFee : 0));
+        let usdToCryptoFTXAmount = await GetCryptoExchangeRateFTX(transactionSelectedCryptoId, parseFloat(transactionDepositAmount + (transactionTransactionFee && component !== "merchant" ? transactionTransactionFee : 0)), transaction.depositFiatCurrency, false)
+        let ftxTradeReceiveAmount = { [transactionSelectedCryptoId]: parseFloat(usdToCryptoFTXAmount[transactionSelectedCryptoId]), price: usdToCryptoFTXAmount["price"] }
+        if (["GBP", "EUR"].includes(transaction.depositFiatCurrency) && tradeAPI !== "aquanow") {
+            const eurToUsd = await axios.get(getTradeRateURL(transaction.depositFiatCurrency, "USD", tradeAPI))
+            const eurToUsdRate = parseFloat(getTradeRatePrice(transaction.depositFiatCurrency, "USD", eurToUsd, tradeAPI))
+            let interCal = eurToUsdRate * parseFloat(transactionDepositAmount + (transactionTransactionFee && component !== "merchant" ? transactionTransactionFee : 0))
+            updateMerchantBalanceMsg[`${transaction.depositFiatCurrency? transaction.depositFiatCurrency : "USD"}ToUSDExchangeRate`] = eurToUsdRate;
+            updateMerchantBalanceMsg[`${transaction.depositFiatCurrency? transaction.depositFiatCurrency : "USD"}AmountToBeConvertedToUSD`] = interCal;
+        }
+        if (ftxTradeFromCurrecy === transactionSelectedCryptoId) {
+            updateMerchantBalanceMsg['exchangeRate'] = ftxTradeReceiveAmount["price"];
+            updateMerchantBalanceMsg[`convertedIn${ftxTradeFromCurrecy}`] = ftxTradeReceiveAmount[transactionSelectedCryptoId];
+        }
+        if (component === "merchant" && sendTransactionFee !== null && sendTransactionFee >= 0 ) {          
+            updateMerchantBalanceMsg['balanceExceedsSendWithdrawalAmount+sendFee'] = true;
+            updateMerchantBalanceMsg['sendFee'] = parseFloat(sendTransactionFee);
+            usdToCryptoFTXAmount[transactionSelectedCryptoId] = usdToCryptoFTXAmount[transactionSelectedCryptoId] + parseFloat(sendTransactionFee)
+            updateMerchantBalanceMsg[`updatedAmountAftersendFeeAdded${ftxTradeFromCurrecy}`] = usdToCryptoFTXAmount[transactionSelectedCryptoId];
+        }
+        if (ftxTradeFromCurrecy !== transactionSelectedCryptoId) {
+            ftxTradeReceiveAmount = await GetCryptoExchangeRateFTX(transactionSelectedCryptoId, parseFloat(usdToCryptoFTXAmount[transactionSelectedCryptoId]), ftxTradeFromCurrecy, true)
+            updateMerchantBalanceMsg[`exchangeRate`] = ftxTradeReceiveAmount["price"];
+            updateMerchantBalanceMsg[`convertedIn${ftxTradeFromCurrecy}`] = ftxTradeReceiveAmount[transactionSelectedCryptoId];
+        }
+        const merchant = await getMerchantByMerchantId({ merchantId: transaction.merchantId })
+        if (!merchant) {
+            throw new Error("Merchant not found for merchantId:" + transaction.merchantId)
+        }
+        await updateMerchantTransactionStatus(transaction._id, {
+            "code": STATUS_SELECTED_LIQUIDITY_PROVIDER, "message": `liquidity provider to execute trade: ${getLiquidtyProvider(tradeAPI)}`
+        })
+        await updateMerchantTransactionStatusHistory(transaction._id, transaction.withdrawalWalletAddress, {
+            "code": STATUS_SELECTED_LIQUIDITY_PROVIDER, "message": `liquidity provider to execute trade: ${getLiquidtyProvider(tradeAPI)}`, updated: new Date()
+        })
+        let merchantBalance = await getMerchantWalletByUserIDandCryptoId(merchant._id, ftxTradeFromCurrecy);
+        if (merchantBalance) {
+            merchantBalance?.availableBalanceHistory?.push({
+                previousBalance: merchantBalance.balance.balanceAmount,
+                balanceAdjustment: parseFloat(ftxTradeReceiveAmount[transactionSelectedCryptoId]),
+                relatedTransactionType: transaction.type,
+                relatedTransactionId: transaction.transactionId,
+                cryptoId: ftxTradeFromCurrecy,
+                updated: new Date()
+            })
+            const cryptoDoc = await getCryptotById({ cryptoId: transaction?.selected?.cryptoId });
+            const merchantAutomationDoc = await getMerchantAutomation(transaction.merchantId,cryptoDoc?._id);
+            if(merchantAutomationDoc){
+                updateMerchantBalanceMsg['payoutFrom'] = merchantAutomationDoc?.payoutFrom;
+            } else {
+                updateMerchantBalanceMsg['payoutFrom'] = "Balance";
+            }
+            if (((merchantBalance.balance.balanceAmount ? parseFloat(merchantBalance.balance.balanceAmount) : 0) - parseFloat(ftxTradeReceiveAmount[transactionSelectedCryptoId])) >= 0) {
+                const merchantPreviousBalance = merchantBalance.balance.balanceAmount ? parseFloat(merchantBalance.balance.balanceAmount) : 0;
+                updateMerchantBalanceMsg[`${ftxTradeFromCurrecy}previousBalance`] =  merchantPreviousBalance;
+                updateMerchantBalanceMsg[`${ftxTradeFromCurrecy}updatedBalance`] = merchantPreviousBalance - parseFloat(ftxTradeReceiveAmount[transactionSelectedCryptoId])
+                if (component === "merchant") {
+                    await updateMerchantTransactionStatus(transaction._id, {
+                        "code": constant.WALLET_MANAGEMENT_UPDATE_MERCHANT_WALLET_BALANCE, "message": JSON.stringify(updateMerchantBalanceMsg)
+                    })
+                    await updateMerchantTransactionStatusHistory(transaction._id, transaction.withdrawalWalletAddress, {
+                        "code": constant.WALLET_MANAGEMENT_UPDATE_MERCHANT_WALLET_BALANCE, "message": JSON.stringify(updateMerchantBalanceMsg), updated: new Date()
+                    })
+                } else {
+                    await updateSingleTransaction({ "transactionId": transaction.transactionId },
+                    {
+                        $set: {
+                            "merchantWalletBalanceAdjustment": ftxTradeReceiveAmount[transactionSelectedCryptoId],
+                        }
+                    })
+                    await updateTransactionStatus(transaction._id, {
+                        "code": constant.WALLET_MANAGEMENT_UPDATE_MERCHANT_WALLET_BALANCE, "message": JSON.stringify(updateMerchantBalanceMsg)
+                    })
+                    await updateStatusHistory(transaction._id, transaction.withdrawalWalletAddress, {
+                        "code": constant.WALLET_MANAGEMENT_UPDATE_MERCHANT_WALLET_BALANCE, "message": JSON.stringify(updateMerchantBalanceMsg), updated: new Date()
+                    })
+                }
+
+                merchantBalance.balance.balanceAmount -= parseFloat(ftxTradeReceiveAmount[transactionSelectedCryptoId])
+                merchantBalance.balance.updated = new Date()
+                merchantBalance.lastUpdatedDate = new Date()
+                await updateMerchantBalanceDAO({ '_id': merchantBalance._id }, { "$set": { ...merchantBalance } })
+            } else {
+                if (component === "merchant") {
+                    await updateMerchantTransactionStatus(transaction._id, {
+                        "code": "WalletManagementService::MerchantBalanceLessIsThanWithdrawalAmount", "message": `${ftxTradeFromCurrecy} balance(${merchantBalance.balance.balanceAmount ? parseFloat(merchantBalance.balance.balanceAmount) : 0}) is less than withdrawal amount(${parseFloat(ftxTradeReceiveAmount[transactionSelectedCryptoId])}), so balance is not update.`
+                    })
+                    await updateMerchantTransactionStatusHistory(transaction._id, transaction.withdrawalWalletAddress, {
+                        "code": "WalletManagementService::MerchantBalanceLessIsThanWithdrawalAmount", "message": `${ftxTradeFromCurrecy} balance(${merchantBalance.balance.balanceAmount ? parseFloat(merchantBalance.balance.balanceAmount) : 0}) is less than withdrawal amount(${parseFloat(ftxTradeReceiveAmount[transactionSelectedCryptoId])}), so balance is not update`, updated: new Date()
+                    })
+                } else {
+                    await updateTransactionStatus(transaction._id, {
+                        "code": "WalletManagementService::MerchantBalanceLessIsThanWithdrawalAmount", "message": `${ftxTradeFromCurrecy} balance(${merchantBalance.balance.balanceAmount ? parseFloat(merchantBalance.balance.balanceAmount) : 0}) is less than withdrawal amount(${parseFloat(ftxTradeReceiveAmount[transactionSelectedCryptoId])}), so balance is not update.`
+                    })
+                    await updateStatusHistory(transaction._id, transaction.withdrawalWalletAddress, {
+                        "code": "WalletManagementService::MerchantBalanceLessIsThanWithdrawalAmount", "message": `${ftxTradeFromCurrecy} balance(${merchantBalance.balance.balanceAmount ? parseFloat(merchantBalance.balance.balanceAmount) : 0}) is less than withdrawal amount(${parseFloat(ftxTradeReceiveAmount[transactionSelectedCryptoId])}), so balance is not update.`, updated: new Date()
+                    })
+                }
+            }
+        } else if(!["TRX", "TRC20-USDT"]?.includes(ftxTradeFromCurrecy)) {
+            throw new Error("Merchant balances is not found to deduct withdrawal amount.")
+        }
+    } catch (err) {
+        console.log(err)
+        throw err
+    }
+}
+
+const updateMerchantBalance = async (transaction, ftxTradeFromCurrecy, component, sendFee) => {
+    let tradeAPI = "aquanow"
+    try {
+        let updateMerchantBalanceMsg = { 'transaction.withdrawalAmount': transaction.depositAmount}; // changed this updateMerchantBalanceMsg from string to json object for transaction validation CRYP-3137
+        if (component !== "merchant") {
+            updateMerchantBalanceMsg['transaction.transactionFee'] = transaction.transactionFee ? transaction.transactionFee : 0;
+        }
+        updateMerchantBalanceMsg[`${transaction.depositFiatCurrency}AmountToBeConverted`] = parseFloat(transaction.depositAmount + (transaction.transactionFee && component !== "merchant" ? transaction.transactionFee : 0)); // here we are calculating fiat currency amount after converting from crypto
+        let usdToCryptoFTXAmount = await GetCryptoExchangeRateFTX(transaction.selected.cryptoId, parseFloat(transaction.depositAmount + (transaction.transactionFee && component !== "merchant" ? transaction.transactionFee : 0)), transaction.depositFiatCurrency, false)
+        let ftxTradeReceiveAmount = { [transaction.selected.cryptoId]: parseFloat(usdToCryptoFTXAmount[transaction.selected.cryptoId]), price: usdToCryptoFTXAmount["price"] }
+        if (["GBP", "EUR"].includes(transaction.depositFiatCurrency) && tradeAPI !== "aquanow") {
+            const eurToUsd = await axios.get(getTradeRateURL(transaction.depositFiatCurrency, "USD", tradeAPI))
+            const eurToUsdRate = parseFloat(getTradeRatePrice(transaction.depositFiatCurrency, "USD", eurToUsd, tradeAPI))
+            let interCal = eurToUsdRate * parseFloat(transaction.depositAmount + (transaction.transactionFee && component !== "merchant" ? transaction.transactionFee : 0))
+            updateMerchantBalanceMsg[`${transaction.depositFiatCurrency? transaction.depositFiatCurrency : "USD"}ToUSDExchangeRate`] = eurToUsdRate;
+            updateMerchantBalanceMsg[`${transaction.depositFiatCurrency? transaction.depositFiatCurrency : "USD"}AmountToBeConvertedToUSD`] = interCal;
+        }
+        if (ftxTradeFromCurrecy === transaction.selected.cryptoId) {
+            updateMerchantBalanceMsg['exchangeRate'] = ftxTradeReceiveAmount["price"];
+            updateMerchantBalanceMsg[`convertedIn${ftxTradeFromCurrecy}`] = ftxTradeReceiveAmount[transaction.selected.cryptoId];
+        }
+        if (component === "merchant" && sendFee !== null && sendFee >= 0 ) {          
+            updateMerchantBalanceMsg['balanceExceedsSendWithdrawalAmount+sendFee'] = true;
+            updateMerchantBalanceMsg['sendFee'] = parseFloat(sendFee);
+            usdToCryptoFTXAmount[transaction.selected.cryptoId] = usdToCryptoFTXAmount[transaction.selected.cryptoId] + parseFloat(sendFee)
+            updateMerchantBalanceMsg[`updatedAmountAfterSendFeeAdded${ftxTradeFromCurrecy}`] = usdToCryptoFTXAmount[transaction.selected.cryptoId];
+        }
+        if (ftxTradeFromCurrecy !== transaction.selected.cryptoId) {
+            ftxTradeReceiveAmount = await GetCryptoExchangeRateFTX(transaction.selected.cryptoId, parseFloat(usdToCryptoFTXAmount[transaction.selected.cryptoId]), ftxTradeFromCurrecy, true)
+            updateMerchantBalanceMsg[`exchangeRate`] = ftxTradeReceiveAmount["price"];
+            updateMerchantBalanceMsg[`convertedIn${ftxTradeFromCurrecy}`] = ftxTradeReceiveAmount[transaction.selected.cryptoId];
+        }
+        const merchant = await merchantsModel.findOne({ merchantId: transaction.merchantId })
+        if (!merchant) {
+            throw new Error("Merchant not found for merchantId:" + transaction.merchantId)
+        }
+        await updateMerchantTransactionStatus(transaction._id, {
+            "code": "WalletManagementService:SelectedLiquidityProvider", "message": `liquidity provider to execute trade: ${getLiquidtyProvider(tradeAPI)}`
+        })
+        await updateMerchantTransactionStatusHistory(transaction._id, transaction.withdrawalWalletAddress, {
+            "code": "WalletManagementService:SelectedLiquidityProvider", "message": `liquidity provider to execute trade: ${getLiquidtyProvider(tradeAPI)}`, updated: new Date()
+        })
+        let merchantBalance = await getMerchantWalletByUserIDandCryptoId(merchant._id, ftxTradeFromCurrecy);
+        if (merchantBalance) {
+            merchantBalance.availableBalanceHistory.push({
+                previousBalance: merchantBalance.balance.balanceAmount,
+                balanceAdjustment: parseFloat(ftxTradeReceiveAmount[transaction.selected.cryptoId]),
+                relatedTransactionType: transaction.type,
+                relatedTransactionId: transaction.transactionId,
+                cryptoId: ftxTradeFromCurrecy,
+                updated: new Date()
+            })
+            const cryptoDoc = await getCryptotById({ cryptoId: transaction?.selected?.cryptoId });
+            const merchantAutomationDoc = await getMerchantAutomation(transaction.merchantId,cryptoDoc?._id);
+            if(merchantAutomationDoc){
+                updateMerchantBalanceMsg['payoutFrom'] = merchantAutomationDoc?.payoutFrom;
+            } else {
+                updateMerchantBalanceMsg['payoutFrom'] = "Balance";
+            }
+            
+            if (((merchantBalance.balance.balanceAmount ? parseFloat(merchantBalance.balance.balanceAmount) : 0) - parseFloat(ftxTradeReceiveAmount[transaction.selected.cryptoId])) >= 0) {
+                const merchantPreviousBalance = merchantBalance.balance.balanceAmount ? parseFloat(merchantBalance.balance.balanceAmount) : 0;
+                updateMerchantBalanceMsg[`${ftxTradeFromCurrecy}previousBalance`] =  merchantPreviousBalance;
+                updateMerchantBalanceMsg[`${ftxTradeFromCurrecy}updatedBalance`] = merchantPreviousBalance - parseFloat(ftxTradeReceiveAmount[transaction.selected.cryptoId])
+                if (component === "merchant") {
+                    await updateMerchantTransactionStatus(transaction._id, {
+                        "code": constant.WALLET_MANAGEMENT_UPDATE_MERCHANT_WALLET_BALANCE, "message": JSON.stringify(updateMerchantBalanceMsg)
+                    })
+                    await updateMerchantTransactionStatusHistory(transaction._id, transaction.withdrawalWalletAddress, {
+                        "code": constant.WALLET_MANAGEMENT_UPDATE_MERCHANT_WALLET_BALANCE, "message": JSON.stringify(updateMerchantBalanceMsg), updated: new Date()
+                    })
+                } else {
+                    await transactionModel.updateOne(
+                        { "transactionId": transaction.transactionId },
+                        {
+                            $set: {
+                                "merchantWalletBalanceAdjustment": ftxTradeReceiveAmount[transaction.selected.cryptoId],
+                            }
+                        }
+                    )
+                    await updateTransactionStatus(transaction._id, {
+                        "code": constant.WALLET_MANAGEMENT_UPDATE_MERCHANT_WALLET_BALANCE, "message": JSON.stringify(updateMerchantBalanceMsg)
+                    })
+                    await updateStatusHistory(transaction._id, transaction.withdrawalWalletAddress, {
+                        "code": constant.WALLET_MANAGEMENT_UPDATE_MERCHANT_WALLET_BALANCE, "message": JSON.stringify(updateMerchantBalanceMsg), updated: new Date()
+                    })
+                }
+
+                merchantBalance.balance.balanceAmount -= parseFloat(ftxTradeReceiveAmount[transaction.selected.cryptoId])
+                merchantBalance.balance.updated = new Date()
+                merchantBalance.lastUpdatedDate = new Date()
+                await merchantBalancesModel.updateOne({ '_id': merchantBalance._id }, { "$set": { ...merchantBalance } })
+            } else {
+                if (component === "merchant") {
+                    await updateMerchantTransactionStatus(transaction._id, {
+                        "code": "WalletManagementService::MerchantBalanceLessIsThanWithdrawalAmount", "message": `${ftxTradeFromCurrecy} balance(${merchantBalance.balance.balanceAmount ? parseFloat(merchantBalance.balance.balanceAmount) : 0}) is less than withdrawal amount(${parseFloat(ftxTradeReceiveAmount[transaction.selected.cryptoId])}), so balance is not update.`
+                    })
+                    await updateMerchantTransactionStatusHistory(transaction._id, transaction.withdrawalWalletAddress, {
+                        "code": "WalletManagementService::MerchantBalanceLessIsThanWithdrawalAmount", "message": `${ftxTradeFromCurrecy} balance(${merchantBalance.balance.balanceAmount ? parseFloat(merchantBalance.balance.balanceAmount) : 0}) is less than withdrawal amount(${parseFloat(ftxTradeReceiveAmount[transaction.selected.cryptoId])}), so balance is not update`, updated: new Date()
+                    })
+                } else {
+                    await updateTransactionStatus(transaction._id, {
+                        "code": "WalletManagementService::MerchantBalanceLessIsThanWithdrawalAmount", "message": `${ftxTradeFromCurrecy} balance(${merchantBalance.balance.balanceAmount ? parseFloat(merchantBalance.balance.balanceAmount) : 0}) is less than withdrawal amount(${parseFloat(ftxTradeReceiveAmount[transaction.selected.cryptoId])}), so balance is not update.`
+                    })
+                    await updateStatusHistory(transaction._id, transaction.withdrawalWalletAddress, {
+                        "code": "WalletManagementService::MerchantBalanceLessIsThanWithdrawalAmount", "message": `${ftxTradeFromCurrecy} balance(${merchantBalance.balance.balanceAmount ? parseFloat(merchantBalance.balance.balanceAmount) : 0}) is less than withdrawal amount(${parseFloat(ftxTradeReceiveAmount[transaction.selected.cryptoId])}), so balance is not update.`, updated: new Date()
+                    })
+                }
+            }
+        } else if(!["TRX", "TRC20-USDT"]?.includes(ftxTradeFromCurrecy)) {
+            throw new Error("Merchant balances is not found to deduct withdrawal amount.")
+        }
+    } catch (err) {
+        console.log(err)
+        throw err
+    }
+}
+
+const updateMerchantWithdrawalBalance = async (transaction, ftxTradeFromCurrecy, component, sendFee) => {
+  let tradeAPI = "aquanow"
+  try {
+    const updateMerchantBalanceMsg = { 'transaction.withdrawalAmount': transaction.depositAmount}; // changed this updateMerchantBalanceMsg from string to json object for transaction validation CRYP-3137
+    if (component !== "merchant") {
+      updateMerchantBalanceMsg['transaction.transactionFee'] = transaction.transactionFee ? transaction.transactionFee : 0;
+    }
+    updateMerchantBalanceMsg[`${transaction.depositFiatCurrency}AmountToBeConverted`] = parseFloat(transaction.depositAmount + (transaction.transactionFee && component !== "merchant" ? transaction.transactionFee : 0)); // here we are calculating fiat currency amount after converting from crypto
+    const usdToCryptoFTXAmount = await GetCryptoExchangeRateFTX(transaction.selected.cryptoId, parseFloat(transaction.depositAmount + (transaction.transactionFee && component !== "merchant" ? transaction.transactionFee : 0)), transaction.depositFiatCurrency, false)
+    let ftxTradeReceiveAmount = { [transaction.selected.cryptoId]: parseFloat(usdToCryptoFTXAmount[transaction.selected.cryptoId]), price: usdToCryptoFTXAmount["price"] }
+    if (["GBP", "EUR"].includes(transaction.depositFiatCurrency) && tradeAPI !== "aquanow") {
+      const eurToUsd = await axios.get(getTradeRateURL(transaction.depositFiatCurrency, "USD", tradeAPI))
+      const eurToUsdRate = parseFloat(getTradeRatePrice(transaction.depositFiatCurrency, "USD", eurToUsd, tradeAPI))
+      const interCal = eurToUsdRate * parseFloat(transaction.depositAmount + (transaction.transactionFee && component !== "merchant" ? transaction.transactionFee : 0))
+      updateMerchantBalanceMsg[`${transaction.depositFiatCurrency? transaction.depositFiatCurrency : "USD"}ToUSDExchangeRate`] = eurToUsdRate;
+      updateMerchantBalanceMsg[`${transaction.depositFiatCurrency? transaction.depositFiatCurrency : "USD"}AmountToBeConvertedToUSD`] = interCal;
+    }
+    if (ftxTradeFromCurrecy === transaction.selected.cryptoId) {
+      updateMerchantBalanceMsg['exchangeRate'] = ftxTradeReceiveAmount["price"];
+      updateMerchantBalanceMsg[`convertedIn${ftxTradeFromCurrecy}`] = ftxTradeReceiveAmount[transaction.selected.cryptoId];
+    }
+    if (component === "merchant" && sendFee !== null && sendFee >= 0 ) {
+      updateMerchantBalanceMsg['balanceExceedsSendWithdrawalAmount+sendFee'] = true;
+      updateMerchantBalanceMsg['sendFee'] = parseFloat(sendFee);
+      usdToCryptoFTXAmount[transaction.selected.cryptoId] = usdToCryptoFTXAmount[transaction.selected.cryptoId] + parseFloat(sendFee)
+      updateMerchantBalanceMsg[`updatedAmountAfterSendFeeAdded${ftxTradeFromCurrecy}`] = usdToCryptoFTXAmount[transaction.selected.cryptoId];
+    }
+    if (ftxTradeFromCurrecy !== transaction.selected.cryptoId) {
+      ftxTradeReceiveAmount = await GetCryptoExchangeRateFTX(transaction.selected.cryptoId, parseFloat(usdToCryptoFTXAmount[transaction.selected.cryptoId]), ftxTradeFromCurrecy, true)
+      updateMerchantBalanceMsg[`exchangeRate`] = ftxTradeReceiveAmount["price"];
+      updateMerchantBalanceMsg[`convertedIn${ftxTradeFromCurrecy}`] = ftxTradeReceiveAmount[transaction.selected.cryptoId];
+    }
+    const merchant = await getMerchantByMerchantId({ merchantId: transaction.merchantId })
+    if (!merchant) {
+      throw new Error("Merchant not found for merchantId:" + transaction.merchantId)
+    }
+    await updateMerchantTransactionStatus(transaction._id, {
+      "code": "WalletManagementService:SelectedLiquidityProvider", "message": `liquidity provider to execute trade: ${getLiquidtyProvider(tradeAPI)}`
+    })
+    await updateMerchantTransactionStatusHistory(transaction._id, transaction.withdrawalWalletAddress, {
+      "code": "WalletManagementService:SelectedLiquidityProvider", "message": `liquidity provider to execute trade: ${getLiquidtyProvider(tradeAPI)}`, updated: new Date()
+    })
+  } catch (err) {
+    console.log(err)
+    throw err
+  }
+}
+
+const getFtxTradeReceiveCurrecy = async (merchantAutomation) => {
+    let ftxTradeReceiveCurrecy = "USDT"
+    if (merchantAutomation && merchantAutomation.automation === "autotrade" && merchantAutomation.autotradeTo) {
+        const withdrawalCrypto = await cryptoModel.findOne({ "_id": new mongoose.Types.ObjectId(merchantAutomation.autotradeTo) })
+        ftxTradeReceiveCurrecy = withdrawalCrypto.cryptoId;
+    }
+    return ftxTradeReceiveCurrecy;
+}
+const getFtxTradeFromCurrecy = async (defaultFromCurrecy, merchantAutomation) => {
+    let ftxTradeFromCurrecy = defaultFromCurrecy;
+    if (merchantAutomation && merchantAutomation.payoutFrom && ["USDT", "USDC"].includes(merchantAutomation.payoutFrom)) {
+        ftxTradeFromCurrecy = merchantAutomation.payoutFrom;
+    }
+    return ftxTradeFromCurrecy;
+}
+
+
+const createMerchantAutoTradeTransaction = async (transaction, ftxTradeFromCurrecy, ftxTradeReceiveCurrecy, component) => {
+    ftxTradeFromCurrecy = (ftxTradeFromCurrecy === "TRC20-USDT") ? "USDT" : ftxTradeFromCurrecy
+    try {
+        const cond = {
+            '_id': transaction._id
+        }
+        const receiveCryptoForWallet = await cryptoModel.findOne({ cryptoId: (["DAI", "USDT", "USDC"].includes(ftxTradeFromCurrecy) ? "ETH" : ftxTradeFromCurrecy) })
+        const walletCond = {
+            "cryptoId": new mongoose.Types.ObjectId(receiveCryptoForWallet._id),
+            "merchantId": transaction.merchantId,
+            "network": transaction.network
+        };
+        const wallet = await merchantWalletsModel.findOne(walletCond);
+        if (!wallet) {
+            console.log("Error: merchant wallet not found!")
+        }
+        const merchant = await merchantsModel.findOne({ merchantId: transaction.merchantId })
+        if (!merchant) {
+            throw new Error("Merchant not found for merchantId:" + transaction.merchantId)
+        }
+        let usdToCryptoFTXAmount = await GetCryptoExchangeRateFTX(transaction.selected.cryptoId, parseFloat(transaction.depositAmount + (transaction.transactionFee && component !== "merchant" ? transaction.transactionFee : 0)), transaction.depositFiatCurrency, false)
+        const ftxTradeFromAmount = await GetCryptoExchangeRateFTX(transaction.selected.cryptoId, parseFloat(usdToCryptoFTXAmount[transaction.selected.cryptoId]), ftxTradeFromCurrecy, true)
+        const addressData = ethWallet["default"].generate();
+        const newTransactionId = addressData.getPrivateKeyString();
+        const transactionObj = new merchantTransactionModal({
+            transactionId: newTransactionId,
+            merchant: merchant._id,
+            merchantId: transaction.merchantId,
+            transactionRefLink: transaction.transactionId,
+            type: "Autotrade",
+            fromWallet: transaction.fromWallet.address,
+            toWallet: transaction.withdrawalWalletAddress,
+            fromCrypto: ftxTradeFromCurrecy,
+            cryptoId: ftxTradeFromCurrecy,
+            fromAmount: parseFloat(ftxTradeFromAmount[transaction.selected.cryptoId]),
+            toCrypto: transaction.selected.cryptoId,
+            toAmount: usdToCryptoFTXAmount[transaction.selected.cryptoId],
+            USDAmount: transaction.depositAmount,
+            "status.code": "MerchantAutoTradeExececuted",
+            "status.message": transaction.transactionId,
+            "status.updated": new Date(),
+            network: transaction.network,
+            createdDate: new Date(),
+        });
+        await transactionObj.save();
+        return { newTransactionId }
+    } catch (error) {
+        console.log("createMerchantAutoTradeTransaction error=====")
+        console.log(error)
+        throw error;
+    }
+};
+
+
+const updateStatus = async (cond, status, message = '') => {
+    await updateTransactionHistory(cond)
+    return await transactionModel.updateOne(cond, { "$set": { 'status.code': status, 'status.message': message, 'status.updated': new Date(), "lastupdatedDate": new Date() } })
+}
+
+
+
+const updateTransactionHistory = async (cond) => {
+    let transaction = await transactionModel.findOne(cond)
+    if (!transaction) {
+        throw new Error("Error transaction not found")
+    }
+    let { code, message, updated, history } = transaction.status
+    history.push({ code, message, updated })
+    return await transactionModel.updateOne(cond, { "$set": { 'status.history': history, "lastupdatedDate": new Date() } })
+}
+const updatebalanceHistroy= async (wallet, transaction, flag)=>{
+    const selectedCrypto = flag ? flag : transaction?.selected?.cryptoId
+    // console.log("+++++++++++++wallet+++++++++++", JSON.stringify(wallet))
+    let oldBalance = null
+    if(wallet && wallet.balance){
+        wallet && wallet.balance && wallet.balance.map(async (balobj) => {
+            console.log(balobj.cryptoId, transaction.selected.cryptoId)
+            if (balobj.cryptoId === selectedCrypto) {
+                oldBalance = {
+                    cryptoId: balobj.cryptoId,
+                    amount: balobj.balanceAmount,
+                    updated: new Date()
+                }
+            } 
+        })
+    }
+    if(!oldBalance && flag !== "trc20") {
+        oldBalance = {
+            cryptoId: transaction.asset ? transaction.asset : transaction.selected.cryptoId,
+            amount: transaction.selected.actualAmountSent ? transaction.selected.actualAmountSent : transaction.selected.amount,
+            updated: new Date()
+        }
+    }
+    return oldBalance
+}
+
+const updatebalanceHistroyB2cUser= async (wallet, transaction)=>{
+    // console.log("+++++++++++++wallet+++++++++++B2C", JSON.stringify(wallet))
+    let oldBalance = null
+    wallet.balance.map(async(balobj)=>{
+        // console.log(balobj.cryptoId , transaction.cryptoId)
+        if(balobj.cryptoId === transaction.cryptoId) {
+            oldBalance = {
+                cryptoId: balobj.cryptoId,
+                amount: balobj.balanceAmount,
+                updated: new Date()
+            }
+        } 
+    })
+
+    if(!oldBalance) {
+        oldBalance = {
+            cryptoId: transaction.cryptoId,
+            amount: transaction.actualAmount.crypto ? transaction.actualAmount.crypto : transaction.amount,
+            updated: new Date()
+        }
+    }
+    // console.log(oldBalance)
+    return oldBalance
+}
+
+const updateWalletStatusMerchant = async (walletInfo, status) => {
+    let { code, message, updated, history } = walletInfo.status
+        history.push({ code, message, updated })
+    await walletModel.updateOne({ "_id": new mongoose.mongo.ObjectId(walletInfo._id) },
+    { 'status.code': status, 'status.message': '', 'status.updated': new Date(), 'status.history': history })
+}
+const getCryptoSymbolForUpdate20Token = (cryptoId) => {
+    if(['DAI', 'USDT', 'USDC']?.includes(cryptoId)) return "ETH"
+    else if(cryptoId === "TRC20-USDT") return "TRX"
+}
+
+export {
+    GetCryptoExchangeRateFTX, updatebalanceHistroy, updatebalanceHistroyB2cUser,
+    getTradeRateURL, getLiquidtyProvider, getTradeRatePrice, getAquanowSignature,
+    getFtxTradeReceiveCurrecy, getFtxTradeFromCurrecy, checkForMerchantLedgerBalance, updateMerchantBalance, updateMerchantWithdrawalBalance, activityTracking, createMerchantAutoTradeTransaction,
+    updateWalletStatusMerchant,updateMerchantBalanceForTRC20, getCryptoSymbolForUpdate20Token
+};
+

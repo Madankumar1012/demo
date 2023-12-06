@@ -1,0 +1,668 @@
+const AWS = require("aws-sdk");
+const docClient = new AWS.DynamoDB.DocumentClient();
+
+exports.handler = async (event) => {
+  const {
+    register_id,
+    registered_match_id,
+    over,
+    runs,
+    innings,
+    account_role,
+  } = event;
+  try {
+    const matchDetails = await getRegisterDetails(
+      register_id,
+      registered_match_id
+    );
+    if (!(matchDetails && matchDetails.Count > 0)) {
+      return {
+        statusCode: 404,
+        error: "true",
+        message: "Match Details not found",
+      };
+    }
+    const fancyDetails = await getOfflineFancyDetails(
+      register_id,
+      registered_match_id,
+      runs,
+      over,
+      innings.toString()
+    );
+    console.log("fancyDetails", fancyDetails);
+    let isMatchRedeclare = false;
+    for (let i = 0; i < fancyDetails?.Count; i++) {
+      let item = fancyDetails.Items[i];
+      if (item.fancy_status == "Y") {
+        continue;
+      }
+      if (item.fancy_status == "R") {
+        isMatchRedeclare = true;
+      }
+      let status = "N";
+      if (runs >= item.runs) {
+        status = "Y";
+      }
+      await updateMatchDetails(
+        register_id,
+        registered_match_id,
+        item.match_fancy_id,
+        runs,
+        status
+      );
+    }
+    if (isMatchRedeclare && matchDetails.Items[0].match_declared == "FR") {
+      await reCalculateResultAndCreateReport(
+        register_id,
+        matchDetails.Items[0],
+        account_role
+      );
+    }
+    return {
+      statusCode: 200,
+      message: "winning team results",
+      data: fancyDetails,
+    };
+  } catch (error) {
+    console.error(error);
+    return {
+      statusCode: 500,
+      error: "true",
+      message: "Error occurred while updating data",
+    };
+  }
+};
+
+const reCalculateResultAndCreateReport = async (
+  register_id,
+  matchDetails,
+  account_role
+) => {
+  let registered_match_id = matchDetails.registered_match_id;
+  let userReportMap = await getUserReportByMatchId(
+    register_id,
+    registered_match_id
+  );
+  let offline_fancy_data = await getMatchFancyData(
+    register_id,
+    registered_match_id
+  );
+
+  if (offline_fancy_data.Count > 0) {
+    let findIndex = offline_fancy_data.Items.findIndex(
+      (item) => item.fancy_status != "Y"
+    );
+    if (findIndex != -1) {
+      return {
+        statusCode: 200,
+        message: "Please declare all the fancies before declaring the match",
+        data: [],
+      };
+    }
+  }
+  let client_object = {};
+  let matchEntryResult = {
+    amount: matchDetails.amount,
+    clientCommission: matchDetails.clientCommission,
+    clientShare: matchDetails.clientShare,
+    referalShare: matchDetails.referalShare,
+    referralComission: matchDetails.referralComission,
+    totalLossOrProfit: matchDetails.totalLossOrProfit,
+    upperLevalShare: matchDetails.upperLevalShare,
+  };
+  let fancyEntryResult = {
+    amount: 0,
+    clientCommission: 0,
+    clientShare: 0,
+    referalShare: 0,
+    referralComission: 0,
+    totalLossOrProfit: 0,
+    upperLevalShare: 0,
+  };
+  if (offline_fancy_data.Count > 0) {
+    let offline_fancy_records = offline_fancy_data.Items;
+    let fancy_records = await getFancyRecordsByMatch(
+      register_id,
+      registered_match_id
+    );
+
+    if (fancy_records.Count > 0) {
+      let fancy_recordsObj = fancy_records.Items;
+
+      for (let i = 0; i < fancy_recordsObj.length; i++) {
+        let fancyEntry = fancy_recordsObj[i];
+        let clientMap = userReportMap.Items.filter(
+          (item) => item.client_id == fancyEntry.client_id
+        );
+        let offline_fancy_record = offline_fancy_records.find((item) => {
+          return item.match_fancy_id === fancyEntry.match_fancy_id;
+        });
+        if (offline_fancy_record && offline_fancy_record.fancy_status) {
+          if (client_object[fancyEntry.client_id]) {
+            if (offline_fancy_record.fancy_status === fancyEntry.yN) {
+              client_object[fancyEntry.client_id]["fancyEntryResult"] =
+                await calulateWinOrLoseObject(
+                  client_object[fancyEntry.client_id]["fancyEntryResult"],
+                  fancyEntry.riskObject.loseCalcultion
+                );
+              fancyEntryResult = await calculateTotalAmount(
+                fancyEntryResult,
+                fancyEntry.riskObject.loseCalcultion
+              );
+            } else {
+              client_object[fancyEntry.client_id]["fancyEntryResult"] =
+                await calulateWinOrLoseObject(
+                  client_object[fancyEntry.client_id]["fancyEntryResult"],
+                  fancyEntry.riskObject.winCalculation
+                );
+              fancyEntryResult = await calculateTotalAmount(
+                fancyEntryResult,
+                fancyEntry.riskObject.winCalculation
+              );
+            }
+          } else {
+            client_object[fancyEntry.client_id] = {
+              matchEntryResult: {
+                amount: clientMap.matchEntryResult.amount,
+                clientCommission: clientMap.matchEntryResult.clientCommission,
+                clientShare: clientMap.matchEntryResult.clientShare,
+                referalShare: clientMap.matchEntryResult.referalShare,
+                referralComission: clientMap.matchEntryResult.referralComission,
+                totalLossOrProfit: clientMap.matchEntryResult.totalLossOrProfit,
+                upperLevalShare: clientMap.matchEntryResult.upperLevalShare,
+                client_name: fancyEntry.client_name,
+                referral_name: fancyEntry.referral_name,
+                refferal_id: fancyEntry.refferal_id,
+              },
+              fancyEntryResult: {
+                amount: 0,
+                clientCommission: 0,
+                clientShare: 0,
+                referalShare: 0,
+                referralComission: 0,
+                totalLossOrProfit: 0,
+                upperLevalShare: 0,
+                client_name: fancyEntry.client_name,
+                referral_name: fancyEntry.referral_name,
+                refferal_id: fancyEntry.refferal_id,
+              },
+            };
+
+            if (offline_fancy_record.fancy_status === fancyEntry.yN) {
+              client_object[fancyEntry.client_id]["fancyEntryResult"] =
+                await calulateWinOrLoseObject(
+                  client_object[fancyEntry.client_id]["fancyEntryResult"],
+                  fancyEntry.riskObject.loseCalcultion
+                );
+              fancyEntryResult = await calculateTotalAmount(
+                fancyEntryResult,
+                fancyEntry.riskObject.loseCalcultion
+              );
+            } else {
+              client_object[fancyEntry.client_id]["fancyEntryResult"] =
+                await calulateWinOrLoseObject(
+                  client_object[fancyEntry.client_id]["fancyEntryResult"],
+                  fancyEntry.riskObject.winCalculation
+                );
+              fancyEntryResult = await calculateTotalAmount(
+                fancyEntryResult,
+                fancyEntry.riskObject.winCalculation
+              );
+            }
+          }
+        }
+      }
+      let totalAmount = {};
+      if (fancyEntryResult.totalLossOrProfit > 0) {
+        const exgistingId = await getAdminRegisterId(register_id);
+        if (exgistingId.count === 0) {
+          return {
+            statusCode: 400,
+            message: `${register_id} Invalid`,
+          };
+        }
+        totalAmount = totalAmount = {
+          amount: matchEntryResult.amount + fancyEntryResult.amount,
+          clientCommission:
+            matchEntryResult.clientCommission +
+            fancyEntryResult.clientCommission,
+          clientShare:
+            matchEntryResult.clientShare + fancyEntryResult.clientShare,
+          referalShare:
+            matchEntryResult.referalShare + fancyEntryResult.referalShare,
+          referralComission:
+            matchEntryResult.referralComission +
+            fancyEntryResult.referralComission,
+          totalLossOrProfit:
+            matchEntryResult.totalLossOrProfit +
+            fancyEntryResult.totalLossOrProfit,
+          upperLevalShare:
+            matchEntryResult.upperLevalShare + fancyEntryResult.amount,
+        };
+        if (exgistingId.Items[0].ul_commision) {
+          totalAmount["platformCommission"] =
+            (exgistingId.Items[0].ul_commision *
+              totalAmount.totalLossOrProfit) /
+            100;
+        } else {
+          totalAmount["platformCommission"] =
+            (0.1 * totalAmount.totalLossOrProfit) / 100;
+        }
+      } else {
+        totalAmount["platformCommission"] = 0;
+      }
+      await updateMatchReport(register_id, registered_match_id);
+      await saveUserMatchDetails(
+        register_id,
+        registered_match_id,
+        client_object,
+        totalAmount,
+        userReportMap
+      );
+      const updateMatch = {
+        TableName: "registered_matches",
+        Key: {
+          register_id: register_id,
+          registered_match_id: registered_match_id,
+        },
+        UpdateExpression: "SET match_declared =:status",
+        ExpressionAttributeValues: {
+          ":status": "Y",
+        },
+      };
+      await docClient.update(updateMatch).promise();
+    }
+  }
+};
+const updateMatchReport = async (register_id, registered_match_id) => {
+  const updateMatch = {
+    TableName: "user_match_report",
+    FilterExpression: {
+      match_id: registered_match_id,
+    },
+    Key: {
+      register_id: register_id,
+    },
+    UpdateExpression: "SET report_status =:status,updated_dt =:updated_dt",
+    ExpressionAttributeValues: {
+      ":status": "inactive",
+      ":updated_dt": new Date().toDateString(),
+    },
+  };
+  await docClient.update(updateMatch).promise();
+};
+const getUserReportByMatchId = async (register_id, registered_match_id) => {
+  const query = {
+    TableName: "user_match_report",
+    KeyConditionExpression: "register_id=:register_id",
+    FilterExpression:
+      "match_id=:registered_match_id AND report_status =:report_status",
+    ExpressionAttributeValues: {
+      ":register_id": register_id,
+      ":registered_match_id": registered_match_id,
+      ":report_status": "active",
+    },
+  };
+  return docClient.query(query).promise();
+};
+const updateMatchDetails = async (
+  register_id,
+  registered_match_id,
+  match_fancy_id,
+  runs,
+  status
+) => {
+  const query = {
+    TableName: "offline_match_fancy",
+    Key: {
+      register_id: register_id,
+      match_fancy_id: match_fancy_id,
+    },
+    UpdateExpression: "SET scored_runs =:runs,fancy_status=:status",
+    ExpressionAttributeValues: {
+      ":runs": runs,
+      ":status": status,
+    },
+    ReturnValues: "ALL_NEW",
+  };
+  await docClient.update(query).promise();
+};
+
+const getOfflineFancyDetails = async (
+  register_id,
+  registered_match_id,
+  runs,
+  over,
+  innings
+) => {
+  const query = {
+    TableName: "offline_match_fancy",
+    KeyConditionExpression:
+      "register_id=:register_id AND begins_with(match_fancy_id, :match_id)",
+    FilterExpression: "match_over=:match_over AND innings=:innings",
+    ExpressionAttributeValues: {
+      ":register_id": register_id,
+      ":match_id": registered_match_id,
+      ":match_over": over,
+      ":innings": innings,
+    },
+  };
+  return docClient.query(query).promise();
+};
+
+const getRegisterDetails = (register_id, registered_match_id) => {
+  const query = {
+    TableName: "registered_matches",
+    KeyConditionExpression:
+      "register_id =:register_id and registered_match_id= :registered_match_id",
+    ExpressionAttributeValues: {
+      ":registered_match_id": registered_match_id,
+      ":register_id": register_id,
+    },
+  };
+  return docClient.query(query).promise();
+};
+
+const getMatchFancyData = async (register_id, match_id) => {
+  const query = {
+    TableName: "offline_match_fancy",
+    KeyConditionExpression:
+      "register_id=:register_id AND begins_with(match_fancy_id, :match_id)",
+    ExpressionAttributeValues: {
+      ":register_id": register_id,
+      ":match_id": match_id,
+    },
+  };
+  return docClient.query(query).promise();
+};
+
+const getFancyRecordsByMatch = async (register_id, registered_match_id) => {
+  const query = {
+    TableName: "fancy_entry",
+    FilterExpression: "record_status=:record_status",
+    KeyConditionExpression:
+      "register_id = :register_id AND begins_with(fancy_entry_id,:match_id)",
+    ExpressionAttributeValues: {
+      ":register_id": register_id,
+      ":match_id": registered_match_id,
+      ":record_status": "active",
+    },
+  };
+  return docClient.query(query).promise();
+};
+
+const getAdminRegisterId = (register_id) => {
+  const query = {
+    TableName: "admin_accounts",
+    KeyConditionExpression: `register_id = :registerIdValue and p_id = :pIdValue`,
+    ExpressionAttributeValues: {
+      ":registerIdValue": register_id,
+      ":pIdValue": "1",
+    },
+  };
+  return docClient.query(query).promise();
+};
+
+const calulateWinOrLoseObject = (currentObject, updateObject) => {
+  return {
+    amount: currentObject.amount + parseFloat(updateObject.amount),
+    clientCommission:
+      currentObject.clientCommission +
+      parseFloat(updateObject.clientCommission),
+    clientShare:
+      currentObject.clientShare + parseFloat(updateObject.clientShare),
+    referalShare:
+      currentObject.referalShare + parseFloat(updateObject.referalShare),
+    referralComission:
+      currentObject.referralComission +
+      parseFloat(updateObject.referralComission),
+    totalLossOrProfit:
+      currentObject.totalLossOrProfit +
+      parseFloat(
+        updateObject.shareLossOrProfit || updateObject.totalLossOrProfit
+      ),
+    upperLevalShare:
+      currentObject.upperLevalShare + parseFloat(updateObject.upperLevalShare),
+    client_name: currentObject.client_name,
+    referral_name: currentObject.referral_name,
+    refferal_id: currentObject.refferal_id,
+  };
+};
+const calculateTotalAmount = (currentObject, updateObject) => {
+  return {
+    amount: currentObject.amount + parseFloat(updateObject.amount),
+    clientCommission:
+      currentObject.clientCommission +
+      parseFloat(updateObject.clientCommission),
+    clientShare:
+      currentObject.clientShare + parseFloat(updateObject.clientShare),
+    referalShare:
+      currentObject.referalShare + parseFloat(updateObject.referalShare),
+    referralComission:
+      currentObject.referralComission +
+      parseFloat(updateObject.referralComission),
+    totalLossOrProfit:
+      currentObject.totalLossOrProfit +
+      parseFloat(
+        updateObject.shareLossOrProfit || updateObject.totalLossOrProfit
+      ),
+    upperLevalShare:
+      currentObject.upperLevalShare + parseFloat(updateObject.upperLevalShare),
+  };
+};
+
+const saveUserMatchDetails = async (
+  register_id,
+  match_id,
+  client_object,
+  totalAmount,
+  declaredUserReport
+) => {
+  let insertArray = [];
+  let keys = Object.keys(client_object);
+
+  for (let i = 0; i < keys.length; i++) {
+    client_object[keys[i]]["totalAmount"] = {
+      amount:
+        client_object[keys[i]]["matchEntryResult"].amount +
+        client_object[keys[i]]["fancyEntryResult"].amount,
+      clientCommission:
+        client_object[keys[i]]["matchEntryResult"].clientCommission +
+        client_object[keys[i]]["fancyEntryResult"].clientCommission,
+      clientShare:
+        client_object[keys[i]]["matchEntryResult"].clientShare +
+        client_object[keys[i]]["fancyEntryResult"].clientShare,
+      referalShare:
+        client_object[keys[i]]["matchEntryResult"].referalShare +
+        client_object[keys[i]]["fancyEntryResult"].referalShare,
+      referralComission:
+        client_object[keys[i]]["matchEntryResult"].referralComission +
+        client_object[keys[i]]["fancyEntryResult"].referralComission,
+      totalLossOrProfit:
+        client_object[keys[i]]["matchEntryResult"].totalLossOrProfit +
+        client_object[keys[i]]["fancyEntryResult"].totalLossOrProfit,
+      upperLevalShare:
+        client_object[keys[i]]["matchEntryResult"].upperLevalShare +
+        client_object[keys[i]]["fancyEntryResult"].upperLevalShare,
+      client_name:
+        client_object[keys[i]]["matchEntryResult"].client_name ||
+        client_object[keys[i]]["fancyEntryResult"].client_name,
+      referral_name:
+        client_object[keys[i]]["matchEntryResult"].client_name ||
+        client_object[keys[i]]["fancyEntryResult"].client_name,
+      refferal_id:
+        client_object[keys[i]]["matchEntryResult"].client_name ||
+        client_object[keys[i]]["fancyEntryResult"].client_name,
+    };
+    insertArray.push({
+      PutRequest: {
+        Item: {
+          report_id: keys[i] + "-" + "rpt-id" + new Date().valueOf(),
+          ...client_object[keys[i]]["totalAmount"],
+          matchEntryResult: client_object[keys[i]].matchEntryResult,
+          fancyEntryResult: client_object[keys[i]].fancyEntryResult,
+          client_id: keys[i],
+          match_id: match_id,
+          created_dt: new Date().getTime(),
+          register_id: register_id,
+        },
+      },
+    });
+  }
+
+  await docClient
+    .batchWrite({ RequestItems: { user_match_report: insertArray } })
+    .promise();
+  const { Items = [] } = await docClient
+    .query({
+      TableName: "offline_users",
+      KeyConditionExpression: "register_id=:register_id",
+      ExpressionAttributeValues: {
+        ":register_id": register_id,
+      },
+    })
+    .promise();
+  const filterRecords = Items.filter((item) => keys.includes(item.client_id));
+
+  const bulkUpdatePromises = filterRecords.map(async (item) => {
+    // update each item with the private visibility
+    let existingClientData = declaredUserReport.find(
+      (item1) => item1.client_id == item.client_id
+    );
+    let client_amount =
+      client_object[item.client_id]["totalAmount"]["amount"] -
+      client_object[item.client_id]["totalAmount"]["clientCommission"] -
+      client_object[item.client_id]["totalAmount"]["clientShare"];
+    if (existingClientData) {
+      client_amount =
+        client_amount -
+        (existingClientData.amount -
+          existingClientData.clientShare -
+          existingClientData.clientCommission);
+    }
+    await docClient
+      .update({
+        TableName: "offline_users",
+        Key: {
+          register_id: register_id,
+          client_id: item.client_id,
+        },
+        UpdateExpression:
+          "SET total_amount = :totalAmount,pending_amount=:pendingAmount",
+        ExpressionAttributeValues: {
+          ":totalAmount": item.total_amount
+            ? item.total_amount + client_amount
+            : client_amount,
+          ":pendingAmount": item.pending_amount
+            ? item.pending_amount + client_amount
+            : client_amount,
+        },
+      })
+      .promise();
+  });
+  // wait till bulk update is completed
+
+  await Promise.all(bulkUpdatePromises);
+  await updateRefferalDetails(
+    register_id,
+    client_object,
+    declaredUserReport,
+    keys
+  );
+};
+const updateRefferalDetails = async (
+  register_id,
+  client_object,
+  declaredUserReport,
+  clientIds
+) => {
+  let clientArray = Object.values(client_object);
+  let filterObject = {};
+  for (let i = 0; i < clientArray.length; i++) {
+    let clientObj = clientArray[i];
+    let existingClientData = declaredUserReport.find((item) =>
+      clientIds.includes(item.client_id)
+    );
+    if (filterObject[clientObj.refferal_id]) {
+      filterObject[clientObj.refferal_id]["referralComission"] =
+        filterObject[clientObj.refferal_id]["referralComission"] +
+        clientObj.referralComission;
+      filterObject[clientObj.refferal_id]["referalShare"] =
+        filterObject[clientObj.refferal_id]["referalShare"] +
+        clientObj.referalShare;
+      filterObject[clientObj.refferal_id]["totalProfitOrLoss"] =
+        filterObject[clientObj.refferal_id]["totalProfitOrLoss"] +
+        clientObj.referalShare +
+        clientObj.referralComission;
+    } else {
+      if (existingClientData) {
+        filterObject[clientObj.refferal_id] = {
+          referralComission:
+            clientObj.referralComission - existingClientData.referralComission,
+          referalShare:
+            clientObj.referalShare - existingClientData.referalShare,
+          totalProfitOrLoss:
+            clientObj.referralComission +
+            clientObj.referalShare -
+            (existingClientData.referalShare +
+              existingClientData.referralComission),
+        };
+      } else {
+        filterObject[clientObj.refferal_id] = {
+          referralComission: clientObj.referralComission,
+          referalShare: clientObj.referalShare,
+          totalProfitOrLoss:
+            clientObj.referralComission + clientObj.referalShare,
+        };
+      }
+    }
+  }
+  if (filterObject) {
+    let keys = Object.keys(filterObject);
+    const { Items = [] } = await docClient
+      .query({
+        TableName: "offline_refferal",
+        KeyConditionExpression: "register_id=:register_id",
+        ExpressionAttributeValues: {
+          ":register_id": register_id,
+        },
+      })
+      .promise();
+    const filterRecords = Items.filter((item) =>
+      keys.includes(item.refferal_id)
+    );
+    const bulkUpdatePromises = filterRecords.map(async (item) => {
+      // update each item with the private visibility
+      await docClient
+        .update({
+          TableName: "offline_refferal",
+          Key: {
+            register_id: register_id,
+            client_id: item.client_id,
+          },
+          UpdateExpression:
+            "SET total_profit_or_loss = :totalAmount,pending_amount=:pendingAmount,share=:share,comission=:comission",
+          ExpressionAttributeValues: {
+            ":totalAmount": item.total_profit_or_loss
+              ? item.total_profit_or_loss +
+                filterObject[item.refferal_id]["totalProfitOrLoss"]
+              : filterObject[item.refferal_id]["totalProfitOrLoss"],
+            ":pendingAmount": item.pending_amount
+              ? item.pending_amount +
+                filterObject[item.refferal_id]["totalProfitOrLoss"]
+              : filterObject[item.refferal_id]["totalProfitOrLoss"],
+            ":comission": item.comission
+              ? item.comission +
+                filterObject[item.refferal_id]["referralComission"]
+              : filterObject[item.refferal_id]["referralComission"],
+            ":share": item.share
+              ? item.share + filterObject[item.refferal_id]["referalShare"]
+              : filterObject[item.refferal_id]["referalShare"],
+          },
+        })
+        .promise();
+    });
+    return Promise.all(bulkUpdatePromises);
+  }
+};
+

@@ -1,0 +1,139 @@
+const AWS = require("aws-sdk");
+const docClient = new AWS.DynamoDB.DocumentClient();
+
+exports.handler = async (event) => {
+  const {
+    register_id,
+    account_role,
+    startDate,
+    endDate,
+    series_name,
+    client_name,
+    match_name,
+    fancy_over,
+    client_id,
+  } = event;
+  try {
+    if (
+      !(
+        account_role == "admin" ||
+        account_role == "subadmin" ||
+        account_role == "supermaster" ||
+        account_role == "master" ||
+        account_role == "superadmin" ||
+        account_role == "director" ||
+        account_role == "agent" ||
+        account_role == "subadmin" ||
+        account_role == "supermaster" ||
+        account_role == "client"
+      )
+    ) {
+      return {
+        statusCode: 404,
+        message: "Invalid role",
+      };
+    }
+
+    const registerAdminData = await getAdminRegisterId(register_id);
+    if (registerAdminData && registerAdminData.Count == 0) {
+      return {
+        statusCode: 400,
+        error: true,
+        message: "Invalid Details",
+      };
+    }
+
+    const params = {
+      TableName: "registered_matches",
+      KeyConditionExpression: "register_id = :register_id",
+      ExpressionAttributeValues: {
+        ":register_id": register_id,
+      },
+      ScanIndexForward: false,
+    };
+
+    let matchData = [];
+    const matchDataByRole = await docClient.query(params).promise();
+    matchData = [...matchDataByRole?.Items];
+
+    if (matchData.length === 0) {
+      return {
+        statusCode: 404,
+        message: "Data not found",
+      };
+    }
+
+  
+
+   if (client_id) {
+      matchData = await getMatchDataByClient(
+        matchData,
+        register_id,
+        client_id,
+      );
+    }
+        if (matchData.length === 0) {
+      return {
+        statusCode: 404,
+        message: "Data not available",
+      };
+    }
+  
+
+    return {
+      statusCode: 200,
+      message: "Data retrieved successfully",
+      data: matchData,
+    };
+  } catch (error) {
+    console.error(error);
+    return {
+      statusCode: 500,
+      error: "true",
+      message: "Error occurred while retrieving data",
+    };
+  }
+};
+const getMatchDataByClient = async (
+  matchData,
+  register_id,
+  client_id,
+  match_ids
+) => {
+  let clientParams = {
+    TableName: "user_match_report",
+    FilterExpression:
+      "client_id=:client_id AND report_status <> :report_status",
+    KeyConditionExpression: "register_id=:register_id",
+    ExpressionAttributeValues: {
+      ":register_id": register_id,
+      ":client_id": client_id,
+      ":report_status": "Y",
+    },
+  };
+  const clientDataTable = await docClient.query(clientParams).promise();
+  // console.log({clientDataTable: clientDataTable.Items})
+  // console.log("match_ids", match_ids)
+  const clientRecords = clientDataTable.Items
+    // clientDataTable.Count > 0 ?
+    //   clientDataTable.Items.filter((item) => {
+    //       return match_ids.includes(item.registered_match_id);
+    //     })
+    //   : [];
+      // console.log({clientRecords})
+
+  return clientRecords;
+};
+
+const getAdminRegisterId = (register_id) => {
+  const query = {
+    TableName: "admin_accounts",
+    KeyConditionExpression: `register_id = :registerIdValue and p_id = :pIdValue`,
+    ExpressionAttributeValues: {
+      ":registerIdValue": register_id,
+      ":pIdValue": "1",
+    },
+  };
+  return docClient.query(query).promise();
+};
+

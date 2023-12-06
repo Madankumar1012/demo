@@ -1,0 +1,204 @@
+const AWS = require('aws-sdk');
+const docClient = new AWS.DynamoDB.DocumentClient();
+
+exports.handler = async (event) => {
+  const {
+    client_name,
+    client_type,
+    alias_name,
+    existing_user_id,
+    referral_name,
+    location,
+    account_role,
+    register_id,
+    deposit_type,
+    client_share = 0,
+    client_comm = 0,
+    client_risk_limit = 1000000,
+    refferal_share = 0,
+    refferal_comm = 0,
+    fancy_comm = 0,
+    refferal_fancy_comm = 0,
+    master_share = 0,
+    master_comm = 0,
+    ul_share = 0,
+    ul_comm = 0,
+  } = event;
+
+  // Validate mandatory fields
+  if (!client_name || !client_type || !alias_name || !existing_user_id || !account_role || !register_id) {
+    return {
+      statusCode: 400,
+      message: JSON.stringify('Missing mandatory fields.'),
+    };
+  }
+
+  // Convert fields to float
+  const clientShareFloat = parseFloat(client_share);
+  const clientCommFloat = parseFloat(client_comm);
+  const refferalShareFloat = parseFloat(refferal_share);
+  const refferalCommFloat = parseFloat(refferal_comm);
+  const fancyCommFloat = parseFloat(fancy_comm);
+  const refferalFancyCommFloat = parseFloat(refferal_fancy_comm);
+  const masterShareFloat = parseFloat(master_share);
+  const masterCommFloat = parseFloat(master_comm);
+  const ulShareFloat = parseFloat(ul_share);
+  const ulCommFloat = parseFloat(ul_comm);
+
+  // Validate that the combined values of comm and share fields do not exceed 100
+  const totalCommShare =
+    +clientShareFloat +
+    +clientCommFloat +
+    +refferalShareFloat +
+    +refferalCommFloat +
+    +fancyCommFloat +
+    +refferalFancyCommFloat +
+    +masterShareFloat +
+    +masterCommFloat +
+    +ulShareFloat +
+    +ulCommFloat;
+
+  if (totalCommShare > 100) {
+    return {
+      statusCode: 400,
+      error: true,
+      message: JSON.stringify('The combined comm and share values cannot exceed 100.'),
+    };
+  }
+
+  try {
+    const isValidUser = await getAdminDetails(register_id);
+    if (!isValidUser?.Count) {
+      return {
+        statusCode: 401,
+        error: true,
+        message: 'Invalid user',
+      };
+    }
+
+    const isUserExists = await getUserDetails(alias_name, existing_user_id);
+    if (isUserExists?.Count) {
+      return {
+        statusCode: 400,
+        error: true,
+        message: 'Duplicate entry clientName or client id already exist',
+      };
+    }
+
+    let referralObj = {};
+
+    if (referral_name) {
+      const referalDetails = await getRefferalData(register_id, referral_name);
+      if (referalDetails?.Count > 0) {
+        referralObj = referalDetails.Items[0];
+      } else {
+        let referId = 'ref_' + new Date().valueOf();
+        const referralItem = {
+          Item: {
+            register_id: register_id,
+            refferal_id: referId,
+            referral_name: referral_name,
+            created_dt: new Date().toISOString(),
+          },
+          TableName: 'offline_refferal',
+        };
+        let referObj = await docClient.put(referralItem).promise();
+        if (referObj) {
+          referralObj['refferal_id'] = referId;
+          referralObj['referral_name'] = referral_name;
+        } else {
+          return {
+            statusCode: 500,
+            error: true,
+            message: `Error occurred while adding refferal`,
+          };
+        }
+      }
+    }
+    
+    delete event['register_id'];
+    
+    await docClient
+      .put({
+        TableName: 'offline_users',
+        Item: {
+          client_id: 'client-' + new Date().valueOf(),
+          ...event,
+          register_id: existing_user_id,
+          refferal_id: referralObj['refferal_id'],
+          referral_name: referralObj['referral_name'],
+        },
+      })
+      .promise();
+    return {
+      statusCode: 201,
+      message: 'Client created successfully',
+    };
+  } catch (error) {
+    const response = {
+      statusCode: 500,
+      error: true,
+      message: JSON.stringify(error),
+    };
+    return response;
+  }
+};
+const getAdminDetails = (register_id) => {
+  let params = {
+    TableName: 'admin_accounts',
+    KeyConditionExpression: 'register_id = :register_id and p_id = :pIdValue',
+    ExpressionAttributeValues: {
+      ':register_id': register_id,
+      ':pIdValue': '1',
+    },
+    ScanIndexForward: true,
+  };
+  return docClient.query(params).promise();
+};
+
+const getUserDetails = (alias_name, register_id) => {
+  const params = {
+    TableName: 'offline_users',
+    KeyConditionExpression: 'register_id = :register_id',
+    FilterExpression: 'alias_name = :alias_name',
+    ExpressionAttributeValues: {
+      ':register_id': register_id,
+      ':alias_name': alias_name
+    },
+  };
+  return docClient.query(params).promise();
+};
+
+const getRefferalData = (register_id, referral_name) => {
+  const query = {
+    TableName: 'offline_refferal',
+    FilterExpression: 'referral_name = :refferal_name',
+    KeyConditionExpression: `register_id = :register_id`,
+    ExpressionAttributeValues: { ':register_id': register_id, ':refferal_name': referral_name },
+  };
+  return docClient.query(query).promise();
+};
+
+
+
+{
+  "client_name": "user-32",
+  "client_type": 1,
+  "alias_name": "v999",
+  "existing_user_id": "client-20230918174113673",
+  "referral_name": "",
+  "location": "hyd",
+  "account_role": "superadmin",
+  "register_id": "reg-20230918153256097",
+  "deposit_type": 1,
+  "client_share": 2,
+  "client_comm": 1,
+  "refferal_share": 0,
+  "refferal_comm": 0,
+  "fancy_comm": 0,
+  "refferal_fancy_comm": 0,
+  "master_share": 2,
+  "master_comm": 1,
+  "ul_share": 0,
+  "ul_comm": 0
+}

@@ -1,0 +1,135 @@
+const AWS = require("aws-sdk");
+const docClient = new AWS.DynamoDB.DocumentClient();
+
+exports.handler = async (event) => {
+  const { register_id, registered_match_id } = event;
+
+  const calulateSumObject = (currentObject, updateObject) => {
+    return {
+      amount: currentObject.amount + parseFloat(updateObject.amount),
+      clientComission:
+        currentObject.clientComission +
+        parseFloat(updateObject.clientComission),
+      clientShare:
+        currentObject.clientShare + parseFloat(updateObject.clientShare),
+      referalShare:
+        currentObject.referalShare + parseFloat(updateObject.referalShare),
+      referralComission:
+        currentObject.referralComission +
+        parseFloat(updateObject.referralComission),
+      totalLossOrProfit:
+        currentObject.totalLossOrProfit +
+        parseFloat(updateObject.totalLossOrProfit),
+      upperLevalShare:
+        currentObject.upperLevalShare +
+        parseFloat(updateObject.upperLevalShare),
+      client_name: currentObject.client_name,
+      client_id: currentObject.client_id,
+    };
+  };
+  const calulateReferralData = (currentObject, updateObject) => {
+    return {
+      referalShare:
+        currentObject.referalShare + parseFloat(updateObject.referalShare),
+      referralComission:
+        currentObject.referralComission +
+        parseFloat(updateObject.referralComission),
+      referral_name: currentObject.referral_name,
+      referral_id: currentObject.referral_id,
+    };
+  };
+  const params = {
+    TableName: "user_match_report",
+  //  FilterExpression: "report_status ='active'",
+    KeyConditionExpression: "register_id = :register_id",
+    ExpressionAttributeValues: {
+      ":register_id": register_id
+    },
+  };
+  if (registered_match_id) {
+    params.FilterExpression = " match_id =:registered_match_id";
+    params.ExpressionAttributeValues[":registered_match_id"] =
+      registered_match_id;
+  }
+  try {
+    const data = await docClient.query(params).promise();
+    if (data.Items.length > 0) {
+      let match_report_data = data.Items;
+
+      let client_object = {};
+      let refferl_object = {};
+
+      for (let i = 0; i < match_report_data.length; i++) {
+        let match_report = match_report_data[i];
+        if (match_report.referral_id) {
+          if (refferl_object[match_report.referral_id]) {
+            refferl_object[match_report.referral_id] =
+              await calulateReferralData(
+                refferl_object[match_report.referral_id],
+                match_report
+              );
+          } else {
+            refferl_object[match_report.referral_id] = {
+              referalShare: 0,
+              referralComission: 0,
+              referral_name: match_report.referral_name,
+              referral_id: match_report.referral_id,
+            };
+            refferl_object[match_report.referral_id] =
+              await calulateReferralData(
+                refferl_object[match_report.referral_id],
+                match_report
+              );
+          }
+        }
+        if (client_object[match_report.client_id]) {
+          // client_object[match_report.client_id] = await calulateSumObject(
+          //   client_object[match_report.client_id],
+          //   match_report
+          // );
+                 client_object[match_report.client_id] = match_report;
+        } else {
+           client_object[match_report.client_id] = match_report;
+          // client_object[match_report.client_id] = {
+          //   amount: 0,
+          //   clientComission: 0,
+          //   clientShare: 0,
+          //   referalShare: 0,
+          //   referralComission: 0,
+          //   totalLossOrProfit: 0,
+          //   upperLevalShare: 0,
+          //   client_name: match_report.client_name,
+          //   client_id: match_report.client_id,
+          // };
+          // client_object[match_report.client_id] = await calulateSumObject(
+          //   client_object[match_report.client_id],
+          //   match_report
+          // );
+        }
+      }
+
+      return {
+        statusCode: 200,
+        message: "Data retrieved successfully",
+        data: {
+          client_object: Object.values(client_object),
+          refferl_object: Object.values(refferl_object),
+        },
+      };
+    } else {
+      return {
+        statusCode: 404,
+        error: "true",
+        message: "There is no match report avaialble",
+      };
+    }
+  } catch (error) {
+    console.log("error", error);
+    return {
+      statusCode: 500,
+      error: "true",
+      message: "Error getting while retriving the data",
+    };
+  }
+};
+

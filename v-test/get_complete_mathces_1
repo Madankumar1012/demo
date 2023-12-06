@@ -1,0 +1,344 @@
+const AWS = require("aws-sdk");
+const docClient = new AWS.DynamoDB.DocumentClient();
+
+exports.handler = async (event) => {
+  const {
+    register_id,
+    account_role,
+    startDate,
+    endDate,
+    series_name,
+    client_name,
+    match_name,
+    fancy_over,
+    client_id,
+  } = event;
+  try {
+    if (
+      !(
+        account_role == "admin" ||
+        account_role == "subadmin" ||
+        account_role == "supermaster" ||
+        account_role == "master" ||
+        account_role == "superadmin" ||
+        account_role == "director" ||
+        account_role == "agent" ||
+        account_role == "subadmin" ||
+        account_role == "supermaster" ||
+        account_role == "client"
+      )
+    ) {
+      return {
+        statusCode: 404,
+        message: "Invalid role",
+      };
+    }
+
+    const registerAdminData = await getAdminRegisterId(register_id);
+    if (registerAdminData && registerAdminData.Count == 0) {
+      return {
+        statusCode: 400,
+        error: true,
+        message: "Invalid Details",
+      };
+    }
+
+    const params = {
+      TableName: "registered_matches",
+      KeyConditionExpression: "register_id = :register_id",
+      ExpressionAttributeValues: {
+        ":register_id": register_id,
+      },
+      ScanIndexForward: false,
+    };
+
+    let matchData = [];
+    const matchDataByRole = await docClient.query(params).promise();
+    matchData = [...matchDataByRole?.Items];
+
+    if (matchData.length === 0) {
+      return {
+        statusCode: 404,
+        message: "Data not found",
+      };
+    }
+
+    if (startDate && endDate) {
+      const matchStartDate = new Date(startDate);
+
+      matchStartDate.setHours(0);
+      matchStartDate.setMinutes(0);
+      matchStartDate.setSeconds(0);
+
+      const matchEndDate = new Date(endDate);
+      matchEndDate.setHours(23);
+      matchEndDate.setMinutes(59);
+      matchEndDate.setSeconds(59);
+      matchData = matchData.filter(
+        (item) =>
+          item.matchTimeStamp +
+            (item.timeoffset ? item.timeoffset * 60000 : -330 * 60000) <=
+            matchEndDate.getTime() &&
+          item.matchTimeStamp +
+            (item.timeoffset ? item.timeoffset * 60000 : -330 * 60000) >=
+            matchStartDate.getTime()
+      );
+    }
+
+    if (match_name) {
+      matchData = matchData.filter((item) => {
+        const FilterName = match_name.toLowerCase();
+        if (
+          item.team1.toLowerCase().match(FilterName) ||
+          item.team2.toLowerCase().match(FilterName) ||
+          `${item.team1} vs ${item.team2}`
+            .toLowerCase()
+            .replace(/\s/g, "")
+            .match(FilterName.replace(/\s/g, "")) ||
+          `${item.team2} vs ${item.team1}`
+            .toLowerCase()
+            .replace(/\s/g, "")
+            .match(FilterName.replace(/\s/g, ""))
+        ) {
+          return true;
+        }
+        return false;
+      });
+    }
+    if (client_name) {
+      matchData = matchData.filter((item) =>
+        item.client_name?.toLowerCase().includes(client_name.toLowerCase())
+          ? true
+          : false
+      );
+    }
+    if (series_name) {
+      matchData = matchData.filter((item) =>
+        item.series_name.toLowerCase().match(series_name.toLowerCase())
+          ? true
+          : false
+      );
+    }
+    if (matchData.length === 0) {
+      return {
+        statusCode: 404,
+        message: "Data not available",
+      };
+    }
+    let match_ids = [];
+    matchData.map((object) => {
+      object.match_name = `${object.team1} vs ${object.team2}`;
+      object.series_name = object.series_name;
+      object.client_name = object.client_name;
+      match_ids.push(object.match_id);
+    });
+    if (match_ids.length == 0) {
+      return {
+        statusCode: 200,
+        message: "Data retrieved successfully",
+        data: [],
+      };
+    }
+
+    if (fancy_over) {
+      matchData = await getMatchDataByFancy(
+        matchData,
+        register_id,
+        client_id,
+        fancy_over,
+        match_ids
+      );
+    } else if (!fancy_over && client_id) {
+      matchData = await getMatchDataByClient(
+        matchData,
+        register_id,
+        client_id,
+        match_ids
+      );
+    }
+    return {
+      statusCode: 200,
+      message: "Data retrieved successfully",
+      data: matchData,
+    };
+  } catch (error) {
+    console.error(error);
+    return {
+      statusCode: 500,
+      error: "true",
+      message: "Error occurred while retrieving data",
+    };
+  }
+};
+const getMatchDataByClient = async (
+  matchData,
+  register_id,
+  client_id,
+  match_ids
+) => {
+  let clientParams = {
+    TableName: "user_match_report",
+    FilterExpression:
+      "client_id=:client_id AND report_status <> :report_status",
+    KeyConditionExpression: "register_id=:register_id",
+    ExpressionAttributeValues: {
+      ":register_id": register_id,
+      ":client_id": client_id,
+      ":report_status": "Y",
+    },
+  };
+  const clientDataTable = await docClient.query(clientParams).promise();
+  const clientRecords =
+    clientDataTable.Count > 0
+      ? clientDataTable.Items.filter((item) => {
+          return match_ids.includes(item.account_id + "-" + item.match_id);
+        })
+      : [];
+  let matchObj = {};
+  let totalAmount = {
+    amount: 0,
+    clientCommission: 0,
+    clientShare: 0,
+    referalShare: 0,
+    referralComission: 0,
+    totalLossOrProfit: 0,
+    upperLevalShare: 0,
+  };
+  for (let i = 0; i < clientRecords.length; i++) {
+    if (matchObj[clientRecords[i].match_id]) {
+      matchObj[clientRecords[i].match_id]["totalAmount"] =
+        await calculateTotalAmount(
+          matchObj[clientRecords[i].match_id]["totalAmount"],
+          clientRecords[i]
+        );
+      matchObj[clientRecords[i].match_id]["client_name"] =
+        clientRecords[i].client_name;
+    } else {
+      matchObj[clientRecords[i].match_id] = {
+        totalAmount: totalAmount,
+        client_name: clientRecords[i].client_name,
+      };
+      matchObj[clientRecords[i].match_id]["totalAmount"] =
+        await calculateTotalAmount(
+          matchObj[clientRecords[i].match_id]["totalAmount"],
+          clientRecords[i]
+        );
+    }
+  }
+
+  matchData.map((object) => {
+    console.log("matchObj", matchObj, object.match_id);
+    object.totalAmount = matchObj[object.account_match_id].totalAmount;
+    object.client_name = matchObj[object.account_match_id].client_name;
+  });
+  return matchData;
+};
+const getMatchDataByFancy = async (
+  matchData,
+  account_id,
+  client_id,
+  fancy_over,
+  match_ids
+) => {
+  try {
+    let fancyParam = {
+      TableName: "fancy_entry",
+      FilterExpression: "fancy_status=:y or fancy_status=:n",
+      KeyConditionExpression: "account_id=:account_id",
+      ExpressionAttributeValues: {
+        ":account_id": account_id,
+        ":y": "Y",
+        ":n": "N",
+      },
+    };
+    if (client_id) {
+      fancyParam.FilterExpression = "client_id =:client_id";
+      fancyParam.ExpressionAttributeValues[":client_id"] = client_id;
+    }
+    const fancyDataTable = await docClient.query(fancyParam).promise();
+    const fancyRecords =
+      fancyDataTable.Count > 0
+        ? fancyDataTable.Items.filter((item) => {
+            return item.over == fancy_over && match_ids.includes(item.match_id);
+          })
+        : [];
+    let matchObj = {};
+    let totalAmount = {
+      amount: 0,
+      clientCommission: 0,
+      clientShare: 0,
+      referalShare: 0,
+      referralComission: 0,
+      totalLossOrProfit: 0,
+      upperLevalShare: 0,
+    };
+    for (let i = 0; i < fancyRecords.length; i++) {
+      if (matchObj[fancyRecords[i].match_id]) {
+        matchObj[fancyRecords[i].match_id]["totalAmount"] =
+          await calculateTotalAmount(
+            matchObj[fancyRecords[i].match_id]["totalAmount"],
+            fancyRecords[i].fancy_status == "Y"
+              ? fancyRecords[i].riskObject.loseCalcultion
+              : fancyRecords[i].riskObject.winCalculation
+          );
+        matchObj[fancyRecords[i].match_id]["client_name"] =
+          fancyRecords[i].client_name;
+      } else {
+        matchObj[fancyRecords[i].match_id] = {
+          totalAmount: totalAmount,
+          client_name: fancyRecords[i].client_name,
+        };
+        matchObj[fancyRecords[i].match_id]["totalAmount"] =
+          await calculateTotalAmount(
+            matchObj[fancyRecords[i].match_id]["totalAmount"],
+            fancyRecords[i].fancy_status == "Y"
+              ? fancyRecords[i].riskObject.loseCalcultion
+              : fancyRecords[i].riskObject.winCalculation
+          );
+      }
+    }
+    matchData.map((object) => {
+      object.totalAmount = matchObj[object.match_id].totalAmount;
+      object.client_name = matchObj[object.match_id].client_name;
+    });
+    return matchData;
+  } catch (error) {
+    console.log("error", error);
+    return error;
+  }
+};
+
+const calculateTotalAmount = async (currentObject, updateObject) => {
+  return {
+    amount: currentObject.amount + parseFloat(updateObject.amount),
+    clientCommission:
+      currentObject.clientCommission +
+      parseFloat(updateObject.clientCommission),
+    clientShare:
+      currentObject.clientShare + parseFloat(updateObject.clientShare),
+    referalShare:
+      currentObject.referalShare + parseFloat(updateObject.referalShare),
+    referralComission:
+      currentObject.referralComission +
+      parseFloat(updateObject.referralComission),
+    totalLossOrProfit:
+      currentObject.totalLossOrProfit +
+      parseFloat(
+        updateObject.shareLossOrProfit || updateObject.totalLossOrProfit
+      ),
+    upperLevalShare:
+      currentObject.upperLevalShare + parseFloat(updateObject.upperLevalShare),
+  };
+};
+const getAdminRegisterId = (register_id) => {
+  const query = {
+    TableName: "admin_accounts",
+    KeyConditionExpression: `register_id = :registerIdValue and p_id = :pIdValue`,
+    ExpressionAttributeValues: {
+      ":registerIdValue": register_id,
+      ":pIdValue": "1",
+    },
+  };
+  return docClient.query(query).promise();
+};
+
