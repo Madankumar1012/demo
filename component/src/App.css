@@ -1,0 +1,14 @@
+.App {
+  text-align: center;
+}
+
+.marvel {
+  color: brown;
+  
+  
+}
+.tony {
+  border: 1px solid gray;
+  display: inline-block;
+  padding: 20px;
+}

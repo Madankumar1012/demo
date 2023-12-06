@@ -1,0 +1,59 @@
+
+ #five {
+    background-color: violet;
+    display: flex;
+ }   
+
+#h2 {
+    color:  green;
+    
+}
+#h1 {
+    color:maroon;
+    text-align: center;
+}
+#one {
+    background-color: yellow;
+    width: 300px;
+    height: 300px;
+    border: 3px solid black;
+    text-align: center;
+    font-weight: 900;
+    
+}
+#two {
+    background-color: cadetblue;
+    width: 300px;
+    height: 300px;
+    border: 3px solid black;
+    text-align: center;
+    font-weight: 900;
+
+}
+#three {
+    background-color: lightgreen;
+    width: 300px;
+    height: 300px;
+    border: 3px solid black;
+    text-align: center;
+    font-weight: 900;
+
+}
+#four {
+
+    background-color: palevioletred;
+    width: 300px;
+    height: 300px;
+    border: 3px solid black;
+    text-align: center;
+    font-weight: 900;
+
+}
+#story {
+    text-align: justify;
+    
+}
+#name {
+    font-size: 1.5rem;
+    font-weight: 900;
+}

@@ -1,0 +1,48 @@
+body {
+  background-color: blanchedalmond;
+}
+#Tim {
+  text-align: center;
+  color: crimson;
+  font-size: 2rem;
+  text-shadow: 10px 10px 10px;
+
+  
+}
+.vinay {
+  display: inline-block;
+  width: 750px;
+  height: 300px;
+  text-align: justify;
+  overflow: auto;
+}
+#time line {
+    text-align: right;
+    color: darkseagreen;
+    
+}
+#lie {
+  text-align: center;
+  color: blue;
+  text-shadow: 10px 10px 10px;
+}
+#block {
+  text-align: center;
+  color: darkmagenta;
+}
+#eich {
+  text-align: center;
+  color: orangered;
+  text-shadow: 10px 10px 10px;
+}
+#career {
+  text-align: center;
+  color: mediumblue;
+  
+}
+#who {
+  text-align: center;
+  color: maroon;
+  font-size: 4rem;
+  text-shadow: 10px 10px 10px
+}

@@ -1,0 +1,138 @@
+.App {
+  width: 100%;
+
+  text-align: center;
+}
+.firstline {
+  top: 0px;
+  padding: 18px;
+  position: sticky;
+  background-color: rgb(248, 221, 231);
+  font-weight: 500;
+}
+.apply {
+  background: rgb(228, 9, 9);
+  color: white;
+  text-decoration: none;
+  padding: 10px;
+  border-radius: 10px;
+  position: sticky;
+}
+.apply:hover {
+  background-color: red;
+}
+.secondline {
+  display: flex;
+  position: sticky;
+  padding: 15px;
+  background-color: white;
+  top: 57.5px;
+  justify-content: space-between;
+}
+.logo {
+  margin-top: 10px;
+}
+.links {
+  display: flex;
+  justify-content: space-between;
+  padding: 10px;
+
+  flex-grow: 0.5;
+}
+.refer {
+  display: flex;
+  justify-content: space-between;
+
+  flex-grow: 0.01;
+}
+.earn {
+  background-color: rgb(234, 247, 250);
+  border-radius: 10px;
+  padding: 15px;
+}
+.earn:hover {
+  background-color: rgb(191, 227, 227);
+}
+.sign {
+  border-radius: 10px;
+  border: 1px solid red;
+  color: red;
+  padding: 15px;
+}
+.sign:hover {
+  background: rgb(249, 233, 235);
+}
+.course:hover {
+  background: rgb(254, 246, 246);
+
+  border-radius: 10px;
+}
+
+.fees:hover {
+  background: rgb(254, 246, 246);
+  border-radius: 10px;
+}
+
+.event:hover {
+  background: rgb(254, 246, 246);
+  border-radius: 10px;
+}
+.learn:hover {
+  background: rgb(254, 246, 246);
+  border-radius: 10px;
+}
+.stories:hover {
+  background: rgb(254, 246, 246);
+  border-radius: 10px;
+}
+.hire:hover {
+  background: rgb(254, 246, 246);
+  border-radius: 10px;
+}
+.links a {
+  text-decoration: none;
+  font-weight: 500;
+  font-size: 0.8rem;
+  color: black;
+}
+.refer a {
+  text-decoration: none;
+  color: red;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.student {
+  display: flex;
+  justify-content: space-between;
+}
+.para {
+  font-size: 1.6rem;
+  text-align: justify;
+  padding-left: 20px;
+}
+mark {
+  background-color: white;
+  color: red;
+}
+.job {
+  background-color: red;
+  color: white;
+
+  font-size: 1.2rem;
+  font-weight: 500;
+  padding: 15px;
+  border-radius: 10px;
+  text-decoration: none;
+}
+.job:hover {
+  background-color: rgb(213, 7, 7);
+  color: white;
+}
+.h1 {
+  font-size: 2.3rem;
+  font-weight: 700;
+  padding-top: 30px;
+}
+.vector {
+  display: inline-flexbox;
+}

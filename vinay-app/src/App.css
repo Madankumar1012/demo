@@ -1,0 +1,92 @@
+
+
+h1 {
+  text-align: center;
+  
+  text-decoration: underline;
+}
+
+
+mark {
+  background-color: white;
+  color: red;
+}
+.sita  {
+  
+ border: 2px solid black;
+  padding: 10px;
+  margin: 5px;
+
+}
+.RAM {
+  display: flex;
+  border: 2px solid black;
+
+  
+}
+img  {
+  width: 200px;
+  height: 200px;
+}
+.story {
+  width: 450px;
+  height: 220px;
+  text-align: justify;
+  overflow: auto;
+  font-weight: 600;
+}
+tr , td {
+  
+  width: 405px;
+  border: 1px solid green;
+  text-align: center;
+  font-weight: 900;
+  color: blue;
+  
+}
+.music {
+   position: relative; 
+  right: -250px;
+  top: -300px;
+} 
+ .video {
+  width: 450px;
+  height: 180px;
+  position: relative;
+  right: -330px;
+  top: -400px; 
+}
+ .rama {
+  position: relative; 
+  right: -250px;
+  top: -425px;
+}
+h3 {
+   position: relative; 
+  right: -260px;
+  top: -660px;
+  text-decoration: underline; 
+}
+p::first-line {
+  color: red;
+  font-weight: 800;
+}
+p {
+  font-weight: 600;
+}
+.youtube {
+  position: relative;
+  width: 600px;
+  height: 300px;
+  right: -350px;
+  top: -30px;
+}
+.leo {
+  border: 2px solid black;
+  position: relative;
+  top: -360px;
+}
+h4 {
+  color: brown;
+  font-weight: 900;
+}

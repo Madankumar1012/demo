@@ -1,0 +1,46 @@
+
+#img1 {
+    position: relative;
+    right: -405px;
+    top: -62px;
+    width: 70px;
+    height: 70px;
+
+}
+#img2 {
+    position: relative;
+    right: -617px;
+bottom: -40px ;
+    width: 200px;
+    height: 120px;
+
+}
+#img3 {
+    position: relative;
+    bottom: -110px;
+    left: -25px;
+    width: 80px;
+
+}
+#img4 {
+    position: relative;
+    right: -260px;
+    top: -53px;
+    width: 80px;
+ 
+
+}
+#img5 {  
+      position: relative;
+      right: -320px;
+      bottom: -150px;
+      width: 80px;
+
+
+}
+#img6 {
+    position: relative;
+    left: -270px;
+    bottom: -13px;
+    width: 130px;
+}

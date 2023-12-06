@@ -1,0 +1,25 @@
+body {
+    background-color: black;
+    color: white;
+}
+#marvel {
+        color: white;
+    text-align: center;
+    font-size: 2rem;    
+}
+    #MCU {
+        background-color: red;
+        color: white;
+        text-align: center;
+        display: inline-block; }
+        #PAGE { color: white;
+
+        }
+        #story {
+            text-align: justify;
+        }
+        #home {
+            color: white;
+        }
+        
+    

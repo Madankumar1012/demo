@@ -1,0 +1,26 @@
+.App {
+  text-align: center;
+}
+
+table {
+  border-collapse: collapse;
+}
+
+table,
+th,
+td {
+  border: 1px solid black;
+}
+
+form{
+  display: inline-block;
+  background-color: lightcoral;
+}
+
+form label {
+  display: inline-block;
+  width: 100px;
+}
+form div {
+  margin: 15px;
+}

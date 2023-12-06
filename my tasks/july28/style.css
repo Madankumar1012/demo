@@ -1,0 +1,34 @@
+body {
+  background-color: lightcoral;
+}
+form {
+  background-color: blueviolet;
+  display: inline-block;
+}
+form label {
+  margin: 5px;
+  width: 100px;
+  display: inline-block;
+}
+label {
+  text-align: center;
+  background-color: white;
+  color: black;
+}
+input {
+  background-color: black;
+  color: white;
+}
+#button {
+  position: relative;
+  right: -100px;
+}
+#form {
+  position: relative;
+  right: -400px;
+  bottom: -100px;
+}
+#legend {
+  color: white;
+  font-weight: 900;
+}

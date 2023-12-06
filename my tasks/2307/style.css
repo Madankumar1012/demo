@@ -1,0 +1,23 @@
+body{
+    background-color: lightblue;
+}
+.img{
+    object-fit: cover;
+    height: 300px;
+    width: 100px;
+    object-position: 0 10;
+}
+#One {
+    color:darkblue ;
+    text-align: center;
+    font-size: 3rem;
+    font-style: italic;
+}
+#two {
+    color: blue;
+    text-align: center;
+    font-size: 2rem;
+}
+.three{
+    text-align: justify;
+}

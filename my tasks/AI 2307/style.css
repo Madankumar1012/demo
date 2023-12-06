@@ -1,0 +1,61 @@
+body {
+    background-image: url(./images/Future-Developments-of-AI.jpg);
+    color: white;
+    background-size: cover;
+    background-position: -0px -100px;
+}
+#heading {
+    text-align: center;
+    font-size: 3rem;
+}
+#ai {
+    color: white;
+}
+#paragraph {
+    color:black;
+    text-align: justify;
+    
+}
+.photo {
+    width: 350px;
+    height: 350px;
+    
+    
+}
+#para2 {
+    color:black;
+    
+    display: inline-block;
+    width: 1000px;
+    height: 300px;
+    text-align: justify;
+    overflow: auto;
+}
+#heading2 {
+    color:black;
+    font-style: oblique;
+    font-size: 2rem;
+}
+.home {
+    color: black;
+}
+#gpt {
+    color: white;
+}
+.chat {
+    width: 350px;
+    height: 350px;
+    border-radius: 10000px;
+    
+    
+ }
+#chatgpt {
+    display: inline-block;
+  width: 1000px;
+  height: 300px;
+  text-align: justify;
+  overflow: auto;
+}
+.PAGE {
+    color: white;
+}
